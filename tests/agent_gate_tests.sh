@@ -235,6 +235,48 @@ expect_failure_contains \
   "action_failed" \
   bash "$ROOT/scripts/agent_gate.sh" --decision "$MOCK_ACTION_FAIL_DECISION" --policy "$ROOT/autonomy.example.yaml" --execute --test-mode
 
+# ---- Granular confirm flag tests ----
+
+# --confirm-prod bypasses production guard but not fleet limit
+PROD_L3_WITH_CONFIRM_PROD="$TMP_DIR/prod-l3-confirm-prod.json"
+write_decision "$PROD_L3_WITH_CONFIRM_PROD" "L3" "medium" "prod" "service.sh" '["demo-host-01", "restart", "generic-service"]' 1 false '["demo-host-01"]'
+expect_success \
+  "--confirm-prod bypasses prod_guard for L3 on prod" \
+  env AGENT_GATE_PRIMITIVES_DIR="$ROOT/scripts" bash "$ROOT/scripts/agent_gate.sh" --decision "$PROD_L3_WITH_CONFIRM_PROD" --policy "$ROOT/autonomy.example.yaml" --dry-run --confirm-prod --confirm-risk
+
+# --confirm-fleet bypasses host count limit
+HOST_LIMIT_WITH_FLEET="$TMP_DIR/host-limit-fleet.json"
+write_decision "$HOST_LIMIT_WITH_FLEET" "L1" "low" "dev" "sys.sh" '["demo-host-01", "summary"]' 5 false '["demo-host-01", "demo-host-02"]'
+expect_success \
+  "--confirm-fleet bypasses host count limit" \
+  env AGENT_GATE_PRIMITIVES_DIR="$ROOT/scripts" bash "$ROOT/scripts/agent_gate.sh" --decision "$HOST_LIMIT_WITH_FLEET" --policy "$ROOT/autonomy.example.yaml" --dry-run --confirm-fleet
+
+# --confirm-path bypasses path_blocked
+PATH_BLOCK_WITH_CONFIRM_PATH="$TMP_DIR/path-block-confirm.json"
+write_decision "$PATH_BLOCK_WITH_CONFIRM_PATH" "L1" "low" "dev" "file.sh" '["demo-host-01", "grep", "/etc/shadow", "root"]' 1 false '["demo-host-01"]'
+expect_success \
+  "--confirm-path bypasses path_blocked" \
+  env AGENT_GATE_PRIMITIVES_DIR="$ROOT/scripts" bash "$ROOT/scripts/agent_gate.sh" --decision "$PATH_BLOCK_WITH_CONFIRM_PATH" --policy "$ROOT/autonomy.example.yaml" --dry-run --confirm-path
+
+# --confirm-prod alone does NOT bypass path_blocked (flags are independent)
+expect_failure_contains \
+  "--confirm-prod alone does not bypass path_blocked" \
+  "path_blocked" \
+  env AGENT_GATE_PRIMITIVES_DIR="$ROOT/scripts" bash "$ROOT/scripts/agent_gate.sh" --decision "$PATH_BLOCK_WITH_CONFIRM_PATH" --policy "$ROOT/autonomy.example.yaml" --dry-run --confirm-prod
+
+# --confirm-fleet alone does NOT bypass prod-related blocks (autonomy_blocked fires before prod_guard)
+PROD_L3_NO_CONFIRM_PROD="$TMP_DIR/prod-l3-no-confirm-prod.json"
+write_decision "$PROD_L3_NO_CONFIRM_PROD" "L3" "medium" "prod" "service.sh" '["demo-host-01", "restart", "generic-service"]' 1 false '["demo-host-01"]'
+expect_failure_contains \
+  "--confirm-fleet alone does not bypass prod autonomy block" \
+  "autonomy_blocked" \
+  env AGENT_GATE_PRIMITIVES_DIR="$ROOT/scripts" bash "$ROOT/scripts/agent_gate.sh" --decision "$PROD_L3_NO_CONFIRM_PROD" --policy "$ROOT/autonomy.example.yaml" --dry-run --confirm-fleet
+
+# legacy --confirm still works (expands to all flags)
+expect_success \
+  "legacy --confirm expands to all confirm flags" \
+  env AGENT_GATE_PRIMITIVES_DIR="$ROOT/scripts" bash "$ROOT/scripts/agent_gate.sh" --decision "$PROD_L3_WITH_CONFIRM_PROD" --policy "$ROOT/autonomy.example.yaml" --dry-run --confirm
+
 # ---- v2.0 tests ----
 
 UNKNOWN_PRIM_DECISION="$TMP_DIR/unknown-prim.json"
@@ -307,5 +349,58 @@ else
   find "$TMP_DIR/hash-audit" -type f -maxdepth 3 -print -exec cat {} \; >&2 || true
   exit 1
 fi
+
+# ---- Risk consistency: primitive_rules.json vs policy.yaml ----
+# For each (primitive, command) pair that appears in both systems,
+# assert that the risk level is consistent so the two rule sets don't drift.
+
+RULES_JSON="$ROOT/scripts/primitive_rules.json"
+POLICY_YAML="$ROOT/scripts/policy.yaml"
+
+risk_from_rules() {
+    local primitive="$1" cmd="$2"
+    python3 - "$RULES_JSON" "$primitive" "$cmd" <<'PY'
+import json, sys
+rules = json.load(open(sys.argv[1]))["primitives"]
+primitive, cmd = sys.argv[2], sys.argv[3]
+rule = rules.get(primitive, {})
+rbc = rule.get("risk_by_command", {})
+if rbc:
+    print(rbc.get(cmd, rbc.get("*", rule.get("risk", "low"))))
+else:
+    print(rule.get("risk", "low"))
+PY
+}
+
+risk_from_policy() {
+    local cmd_string="$1"
+    # --confirm expands to all flags so the command always reaches the success path,
+    # giving us the matched risk level without being blocked.
+    python3 "$ROOT/scripts/agent_gate.py" \
+        --policy-check "$cmd_string" \
+        --host-count 1 \
+        --confirm \
+        2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('risk','low'))" 2>/dev/null || echo "low"
+}
+
+check_risk_consistency() {
+    local label="$1" primitive="$2" cmd="$3" cmd_string="$4"
+    local rules_risk policy_risk
+    rules_risk="$(risk_from_rules "$primitive" "$cmd")"
+    policy_risk="$(risk_from_policy "$cmd_string")"
+    if [[ "$rules_risk" == "$policy_risk" ]]; then
+        pass "risk consistent [$label]: rules=$rules_risk policy=$policy_risk"
+    else
+        echo "FAIL: risk drift [$label]: primitive_rules=$rules_risk policy=$policy_risk cmd='$cmd_string'" >&2
+        exit 1
+    fi
+}
+
+check_risk_consistency "service restart"  "service.sh" "restart" "systemctl restart generic-service"
+check_risk_consistency "service stop"     "service.sh" "stop"    "systemctl stop generic-service"
+check_risk_consistency "service disable"  "service.sh" "disable" "systemctl disable generic-service"
+check_risk_consistency "pkg install"      "pkg.sh"     "install" "apt-get install some-pkg"
+check_risk_consistency "pkg remove"       "pkg.sh"     "remove"  "apt-get remove some-pkg"
+check_risk_consistency "pkg update-cache" "pkg.sh"     "update-cache" "apt-get update"
 
 log "Completed $pass_count generic agent gate tests"

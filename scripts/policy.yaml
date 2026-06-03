@@ -89,7 +89,7 @@ confirm_prod:
     action: confirm_prod
   - id: prod_package_change
     pattern: '(^|\s)(apt(-get)?\s+(install|remove|purge|upgrade|dist-upgrade)|yum\s+(install|remove|update|upgrade)|dnf\s+(install|remove|upgrade)|apk\s+(add|del|upgrade))(\s|$)'
-    risk: medium
+    risk: high
     action: confirm_prod
   - id: prod_container_change
     pattern: '(^|\s)docker\s+(restart|stop|rm)\s'

@@ -112,102 +112,29 @@ any_prod_host() {
     return 1
 }
 
-# Policy rules file path
-POLICY_YAML="${POLICY_YAML:-$SKILL_DIR/policy.yaml}"
-POLICY_LOCAL_YAML="${POLICY_LOCAL_YAML:-$SKILL_DIR/policy.local.yaml}"
-
-_policy_match_rule() {
-    local cmd="$1" rule_id rule_pattern rule_risk rule_action
-    local policy_files="$POLICY_LOCAL_YAML $POLICY_YAML"
-    local pf
-    for pf in $policy_files; do
-        [[ -f "$pf" ]] || continue
-        local category
-        for category in deny_always confirm_single_host confirm_fleet confirm_prod; do
-            local in_category=0
-            while IFS= read -r line; do
-                if echo "$line" | grep -Eq "^${category}:"; then
-                    in_category=1; continue
-                fi
-                if echo "$line" | grep -Eq '^[a-z]' && ! echo "$line" | grep -Eq '^[[:space:]]'; then
-                    [[ "$in_category" -eq 1 ]] && break
-                fi
-                [[ "$in_category" -ne 1 ]] && continue
-                if echo "$line" | grep -q 'id:'; then
-                    rule_id="$(echo "$line" | sed 's/.*id:[[:space:]]*//; s/[[:space:]]*#.*//')"
-                fi
-                if echo "$line" | grep -q 'pattern:'; then
-                    rule_pattern="$(echo "$line" | sed 's/.*pattern:[[:space:]]*//; s/[[:space:]]*#.*//; s/^"//; s/"$//')"
-                fi
-                if echo "$line" | grep -q 'action:'; then
-                    rule_action="$(echo "$line" | sed 's/.*action:[[:space:]]*//; s/[[:space:]]*#.*//')"
-                fi
-                if echo "$line" | grep -q 'risk:'; then
-                    rule_risk="$(echo "$line" | sed 's/.*risk:[[:space:]]*//; s/[[:space:]]*#.*//')"
-                fi
-                if [[ -n "$rule_id" && -n "$rule_pattern" && -n "$rule_action" ]]; then
-                    if echo "$cmd" | grep -Eiq "$rule_pattern"; then
-                        POLICY_MATCHED_RULE="$rule_id"
-                        POLICY_MATCHED_RISK="$rule_risk"
-                        POLICY_MATCHED_ACTION="$rule_action"
-                        return 0
-                    fi
-                    rule_id=""; rule_pattern=""; rule_risk=""; rule_action=""
-                fi
-            done < "$pf"
-        done
-    done
-    return 1
-}
-
-_policy_risk_inline() {
-    local cmd="$1"
-    if echo "$cmd" | grep -Eiq '(^|[;&|[:space:]])(cat|less|more|tail|head|grep|awk|sed)[[:space:]].*(/etc/shadow|/etc/sudoers|/\.ssh/|id_rsa|id_ed25519|\.pem|\.key)([;&|[:space:]]|$)'; then echo high; return; fi
-    if echo "$cmd" | grep -Eiq '(^|[;&|[:space:]])(rm[[:space:]].*(-r|-f|-[A-Za-z]*r[A-Za-z]*f|-[A-Za-z]*f[A-Za-z]*r)[[:space:]]+(/|/\*|/etc|/usr|/var|/home|/root)([[:space:];&|]|$)|mkfs|wipefs|fdisk|parted|sgdisk|shutdown|reboot|poweroff|halt|killall|fuser[[:space:]]+-k)([;&|[:space:]]|$)'; then echo high; return; fi
-    if echo "$cmd" | grep -Eiq '(^|[;&|[:space:]])(dd[[:space:]].*(if=|of=/dev/)|iptables[[:space:]]+(-F|--flush)|ip6tables[[:space:]]+(-F|--flush)|nft[[:space:]]+flush|ufw[[:space:]]+disable|firewall-cmd[[:space:]].*(--panic-on|--complete-reload))([;&|[:space:]]|$)'; then echo high; return; fi
-    if echo "$cmd" | grep -Eiq '(^|[;&|[:space:]])(systemctl[[:space:]]+(stop|disable|mask)|service[[:space:]][^[:space:]]+[[:space:]]+stop|docker[[:space:]]+(rm[[:space:]]+-f|system[[:space:]]+prune)|kubectl[[:space:]]+delete)([;&|[:space:]]|$)'; then echo high; return; fi
-    if echo "$cmd" | grep -Eiq '(^|[;&|[:space:]])(bash|sh)[[:space:]]+-c[[:space:]].*(base64[[:space:]]+-d|curl|wget)'; then echo high; return; fi
-    if echo "$cmd" | grep -Eiq '(^|[;&|[:space:]])(systemctl[[:space:]]+(restart|reload)|service[[:space:]][^[:space:]]+[[:space:]]+(restart|reload)|chmod[[:space:]]+(-R[[:space:]]+)?777|chown[[:space:]]+-R|rm[[:space:]].*(-r|-f)|apt(-get)?[[:space:]]+(install|remove|purge|upgrade|dist-upgrade)|yum[[:space:]]+(install|remove|update)|dnf[[:space:]]+(install|remove|upgrade)|apk[[:space:]]+(add|del|upgrade)|docker[[:space:]]+(restart|stop)|kubectl[[:space:]]+(rollout|scale|apply))([;&|[:space:]]|$)'; then echo medium; return; fi
-    echo low
-}
-
-policy_risk_for_command() {
-    local cmd="$1"
-    if _policy_match_rule "$cmd"; then
-        echo "$POLICY_MATCHED_RISK"
-        return
-    fi
-    _policy_risk_inline "$cmd"
-}
-
-_policy_requires_confirm() {
-    local risk="$1" host_count="$2" host_csv="${3-}" rule_action="${4-}"
-    [[ "$risk" == high && "$rule_action" != "confirm_single" ]] && return 0
-    [[ "$rule_action" == "confirm_single" ]] && return 0
-    [[ "$rule_action" == "confirm_fleet" && "$host_count" -gt 1 ]] && return 0
-    if [[ "$rule_action" == "confirm_prod" ]]; then
-        any_prod_host "$host_csv" && return 0
-    fi
-    [[ "$risk" == high && "$rule_action" != "confirm_single" ]] && return 0
-    [[ "$risk" == medium && "$host_count" -gt 20 ]] && return 0
-    [[ "$risk" == medium ]] && any_prod_host "$host_csv" && return 0
-    return 1
-}
+# Policy rules file path (lives in scripts/ alongside the primitives)
+POLICY_YAML="${POLICY_YAML:-$SCRIPTS_DIR/policy.yaml}"
+POLICY_LOCAL_YAML="${POLICY_LOCAL_YAML:-$SCRIPTS_DIR/policy.local.yaml}"
 
 policy_check_command() {
-    local cmd="$1" host_count="${2:-1}" confirm="${3:-}" host_csv="${4:-}" risk rule_action reason
-    risk="$(policy_risk_for_command "$cmd")"
-    rule_action="${POLICY_MATCHED_ACTION:-}"
-    if [[ "$rule_action" == "block" ]]; then
-        die_json "policy_blocked" "操作被 policy 规则拦截（$POLICY_MATCHED_RULE）：$(redact_string "$cmd")"
-    fi
-    if _policy_requires_confirm "$risk" "$host_count" "$host_csv" "$rule_action"; then
-        if [[ "${SSH_SKILL_CONFIRMED:-}" != yes && "$confirm" != --confirm ]]; then
-            reason="risk=$risk hosts=$host_count"
-            [[ -n "$rule_action" ]] && reason="$reason rule=$POLICY_MATCHED_RULE"
-            [[ "$risk" == medium && "$host_count" -le 20 ]] && reason="$reason prod_target=true"
-            die_json "policy_blocked" "命令需要显式确认：设置 SSH_SKILL_CONFIRMED=yes 或追加 --confirm。$reason cmd=$(redact_string "$cmd")"
-        fi
+    local cmd="$1" host_count="${2:-1}" confirm="${3:-}" host_csv="${4:-}"
+    local confirm_fleet_flag="" confirm_prod_flag=""
+    [[ "$confirm" == "--confirm" || "$confirm" == "--confirm-fleet" || "${SSH_SKILL_CONFIRMED:-}" == yes ]] && confirm_fleet_flag="--confirm-fleet"
+    [[ "$confirm" == "--confirm" || "$confirm" == "--confirm-prod"  || "${SSH_SKILL_CONFIRMED:-}" == yes ]] && confirm_prod_flag="--confirm-prod"
+
+    local result
+    result=$(python3 "$SCRIPTS_DIR/agent_gate.py" \
+        --policy-check "$cmd" \
+        --host-count "$host_count" \
+        --host-csv "$host_csv" \
+        ${confirm_fleet_flag:+"$confirm_fleet_flag"} \
+        ${confirm_prod_flag:+"$confirm_prod_flag"} \
+        2>/dev/null)
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        local msg
+        msg=$(printf '%s' "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('message','policy check failed'))" 2>/dev/null || echo "policy check failed")
+        die_json "policy_blocked" "$(redact_string "$msg")"
     fi
 }
 

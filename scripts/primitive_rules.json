@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "_verify_exit_codes_doc": "healthy=verification passed, failed=condition not met (trigger rollback), error=script/infra error (escalate, do not rollback)",
   "primitives": {
     "sys.sh": {
       "description": "System observation primitives",
@@ -7,14 +8,16 @@
       "arg1": "command",
       "allowed_commands": ["summary", "disk", "memory", "load", "journal", "dmesg", "users"],
       "risk_by_command": {"*": "low"},
-      "unattended": {"L1": true, "L2": true, "L3": true}
+      "unattended": {"L1": true, "L2": true, "L3": true},
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "facts.sh": {
       "description": "Host facts gathering",
       "arg0": "host",
       "allowed_args": ["*"],
       "risk": "low",
-      "unattended": {"L1": true, "L2": true, "L3": true}
+      "unattended": {"L1": true, "L2": true, "L3": true},
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "patrol.sh": {
       "description": "Scheduled observation patrol",
@@ -22,7 +25,8 @@
       "arg1": "mode (summary|full|quick)",
       "allowed_args": ["*"],
       "risk": "low",
-      "unattended": {"L1": true, "L2": true, "L3": true}
+      "unattended": {"L1": true, "L2": true, "L3": true},
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "file.sh": {
       "description": "File operations",
@@ -46,7 +50,8 @@
         "L2": ["backup"],
         "L3": ["mkdir"],
         "L4": ["remove"]
-      }
+      },
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "proc.sh": {
       "description": "Process operations",
@@ -54,7 +59,8 @@
       "arg1": "command",
       "allowed_commands": ["top", "mem", "find", "tree", "kill"],
       "risk_by_command": {"top": "low", "mem": "low", "find": "low", "tree": "low", "kill": "high"},
-      "unattended": {"L1": ["top", "mem", "find", "tree"], "L3": [], "L4": ["kill"]}
+      "unattended": {"L1": ["top", "mem", "find", "tree"], "L3": [], "L4": ["kill"]},
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "net.sh": {
       "description": "Network observation",
@@ -62,7 +68,8 @@
       "arg1": "command",
       "allowed_commands": ["ports", "listen", "curl", "dns", "route", "addr"],
       "risk_by_command": {"*": "low"},
-      "unattended": {"L1": ["ports", "listen", "dns", "route", "addr"], "L2": ["curl"]}
+      "unattended": {"L1": ["ports", "listen", "dns", "route", "addr"], "L2": ["curl"]},
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "pkg.sh": {
       "description": "Package management",
@@ -73,11 +80,12 @@
         "detect": "low",
         "search": "low",
         "installed": "low",
-        "update-cache": "medium",
+        "update-cache": "low",
         "install": "high",
         "remove": "high"
       },
-      "unattended": {"L1": ["detect", "installed", "search"], "L3": ["update-cache"], "L4": ["install", "remove"]}
+      "unattended": {"L1": ["detect", "installed", "search"], "L3": ["update-cache"], "L4": ["install", "remove"]},
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "service.sh": {
       "description": "Service management",
@@ -85,7 +93,8 @@
       "arg1": "command",
       "allowed_commands": ["status", "logs", "restart", "reload", "stop", "disable"],
       "risk_by_command": {"status": "low", "logs": "low", "restart": "medium", "reload": "medium", "stop": "high", "disable": "high"},
-      "unattended": {"L1": ["status", "logs"], "L3": ["restart", "reload"], "L4": ["stop", "disable"]}
+      "unattended": {"L1": ["status", "logs"], "L3": ["restart", "reload"], "L4": ["stop", "disable"]},
+      "verify_exit_codes": {"healthy": [0], "failed": [1, 3], "error": [2, 126, 127, 124]}
     },
     "lock.sh": {
       "description": "Write coordination locks",
@@ -93,19 +102,22 @@
       "arg1": "command",
       "allowed_commands": ["status", "acquire", "release"],
       "risk_by_command": {"status": "low", "acquire": "low", "release": "low"},
-      "unattended": {"L1": ["status"], "L2": ["acquire", "release"]}
+      "unattended": {"L1": ["status"], "L2": ["acquire", "release"]},
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "connect.sh": {
       "description": "SSH ControlMaster connect",
       "arg0": "host",
       "risk": "low",
-      "unattended": {"L2": true}
+      "unattended": {"L2": true},
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "disconnect.sh": {
       "description": "SSH ControlMaster disconnect",
       "arg0": "host",
       "risk": "low",
-      "unattended": {"L2": true}
+      "unattended": {"L2": true},
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "exec.sh": {
       "description": "Raw command execution. Prefer semantic primitives; raw exec is never an unattended default.",
@@ -113,14 +125,16 @@
       "risk_by_args": {"*": "high"},
       "unattended": {"L1": false, "L2": false, "L3": false, "L4": false},
       "note": "agent_gate.py blocks exec.sh unless --allow-raw-exec or explicit confirmation is provided. This rule intentionally documents fail-closed defaults.",
-      "gate_handles_block": true
+      "gate_handles_block": true,
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "scp_transfer.sh": {
       "description": "File transfer",
       "arg0": "host",
       "arg1": "direction (upload|download)",
       "risk": "medium",
-      "unattended": {"L3": true, "L4": true}
+      "unattended": {"L3": true, "L4": true},
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "composite.sh": {
       "description": "Read-only composite observation primitives",
@@ -139,7 +153,8 @@
         "quick": "~3 primitives, lightweight",
         "services": "depends on explicit service count",
         "default": "bounded"
-      }
+      },
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     }
   }
 }

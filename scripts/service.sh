@@ -13,6 +13,8 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
 
+# Validate before use: SERVICE_NAME is interpolated directly into CMD below.
+# This regex is the only barrier preventing shell injection through $SERVICE_NAME.
 [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+$ ]] || die_json "invalid_service" "服务名包含非法字符: $SERVICE_NAME"
 
 case "$ACTION" in
