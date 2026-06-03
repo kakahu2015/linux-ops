@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/kakahu2015/ssh-skill/schemas/gate-result.schema.json",
+  "title": "Agent Gate Result",
+  "description": "Schema for agent_gate.py output (both dry-run and execute modes)",
+  "type": "object",
+  "required": ["success", "run_id"],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "description": "Whether the gate check or execution succeeded"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["dry-run", "execute"],
+      "description": "Gate operation mode"
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Unique run identifier"
+    },
+    "decision_file": {
+      "type": "string",
+      "description": "Path to the decision record file"
+    },
+    "policy_file": {
+      "type": "string",
+      "description": "Path to the autonomy policy file used"
+    },
+    "policy_file_found": {
+      "type": "boolean",
+      "description": "Whether a policy file was loaded"
+    },
+    "autonomy_level": {
+      "type": "string",
+      "pattern": "^L[0-5]$",
+      "description": "Decision autonomy level"
+    },
+    "policy_max_level": {
+      "type": "string",
+      "pattern": "^L[0-5]$",
+      "description": "Max autonomy level allowed by policy"
+    },
+    "risk": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "forbidden"],
+      "description": "Decision risk level"
+    },
+    "environment": {
+      "type": "string",
+      "description": "Target environment"
+    },
+    "host_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of target hosts"
+    },
+    "max_hosts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Max allowed hosts by policy"
+    },
+    "action": {
+      "type": "object",
+      "description": "Action that was validated or executed",
+      "properties": {
+        "primitive": {
+          "type": "string",
+          "description": "Primitive script name"
+        },
+        "args": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Primitive arguments"
+        }
+      }
+    },
+    "error": {
+      "type": "string",
+      "description": "Error code if gate blocked the action"
+    },
+    "message": {
+      "type": "string",
+      "description": "Human-readable error message"
+    },
+    "action_exit_code": {
+      "type": "integer",
+      "description": "Exit code of the executed primitive (execute mode only)"
+    },
+    "verification_action_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of verification actions"
+    },
+    "rollback_action_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of rollback actions"
+    },
+    "rollback_attempted": {
+      "type": "boolean",
+      "description": "Whether rollback was attempted after failed verification"
+    },
+    "audit_decision_file": {
+      "type": "string",
+      "description": "Path to the redacted decision audit file"
+    }
+  }
+}

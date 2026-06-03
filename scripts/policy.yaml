@@ -1,0 +1,101 @@
+# SSH Skill - structured policy rules
+# Categories: deny_always, confirm_single_host, confirm_fleet, confirm_prod
+# Each rule matches against the raw command string (regex).
+# Rules are evaluated in order: deny_always → confirm_single → confirm_fleet → confirm_prod.
+# First match wins. If no rule matches, risk defaults to "low".
+
+version: 1
+
+deny_always:
+  # Private key / credential reads (always blocked by gate + policy)
+  - id: private_key_read
+    pattern: '(cat|less|more|head|tail|grep|awk)\s.*(id_rsa|id_ed25519|\.pem|\.key|/etc/shadow|/etc/sudoers)'
+    risk: high
+    action: block
+
+  # Destructive filesystem operations
+  - id: rm_root
+    pattern: 'rm\s+(-r|-f|-[A-Za-z]*r[A-Za-z]*f|-[A-Za-z]*f[A-Za-z]*r)\s+(/|/\*|/etc|/usr|/var|/home|/root)(\s|;|&|\||$)'
+    risk: high
+    action: block
+  - id: recursive_delete_root
+    pattern: '(find\s.*/-delete|rm\s+-rf\s+/\s+|truncate\s+-s\s+0\s+/)'
+    risk: high
+    action: block
+  - id: mkfs
+    pattern: '(^|\s)(mkfs|wipefs|fdisk|parted|sgdisk)(\s|$)'
+    risk: high
+    action: block
+
+  # System commands with wide impact
+  - id: shutdown_reboot
+    pattern: '(^|\s)(shutdown|reboot|poweroff|halt)(\s|$)'
+    risk: high
+    action: block
+  - id: killall_fuser
+    pattern: '(^|\s)(killall|fuser\s+-k)(\s|$)'
+    risk: high
+    action: block
+
+  # Network / firewall flush
+  - id: iptables_flush
+    pattern: '(^|\s)(iptables\s+(-F|--flush)|ip6tables\s+(-F|--flush)|nft\s+flush|ufw\s+disable|firewall-cmd.*(--panic-on|--complete-reload))(\s|$)'
+    risk: high
+    action: block
+
+  # Remote code execution via base64
+  - id: base64_download_exec
+    pattern: '(bash|sh)\s+-c\s.*(base64\s+-d|curl|wget)\s'
+    risk: high
+    action: block
+
+confirm_single_host:
+  # Service state changes (stop, disable, mask)
+  - id: systemctl_stop
+    pattern: '(^|\s)(systemctl\s+stop|systemctl\s+disable|systemctl\s+mask|service\s+stop)(\s|$)'
+    risk: high
+    action: confirm_single
+  - id: docker_rm_f
+    pattern: '(^|\s)docker\s+(rm\s+-f|system\s+prune)(\s|$)'
+    risk: high
+    action: confirm_single
+  - id: kubectl_delete
+    pattern: '(^|\s)kubectl\s+delete(\s|$)'
+    risk: high
+    action: confirm_single
+  - id: file_delete_recursive
+    pattern: 'rm\s+(-r|-f|-[A-Za-z]*r[A-Za-z]*f)\s'
+    risk: medium
+    action: confirm_single
+
+confirm_fleet:
+  - id: restart_service
+    pattern: '(^|\s)(systemctl\s+(restart|reload)|service\s+(restart|reload))(\s|$)'
+    risk: medium
+    action: confirm_fleet
+  - id: chmod_recursive
+    pattern: '(^|\s)chmod\s+-R\s'
+    risk: medium
+    action: confirm_fleet
+  - id: chown_recursive
+    pattern: '(^|\s)chown\s+-R\s'
+    risk: medium
+    action: confirm_fleet
+
+confirm_prod:
+  - id: prod_service_stop
+    pattern: '(^|\s)(systemctl\s+(stop|disable|mask|restart|reload)|service\s+(stop|restart|reload))(\s|$)'
+    risk: medium
+    action: confirm_prod
+  - id: prod_package_change
+    pattern: '(^|\s)(apt(-get)?\s+(install|remove|purge|upgrade|dist-upgrade)|yum\s+(install|remove|update|upgrade)|dnf\s+(install|remove|upgrade)|apk\s+(add|del|upgrade))(\s|$)'
+    risk: medium
+    action: confirm_prod
+  - id: prod_container_change
+    pattern: '(^|\s)docker\s+(restart|stop|rm)\s'
+    risk: medium
+    action: confirm_prod
+  - id: prod_k8s_change
+    pattern: '(^|\s)kubectl\s+(rollout|scale|apply)\s'
+    risk: medium
+    action: confirm_prod

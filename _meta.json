@@ -1,0 +1,18 @@
+{
+  "name": "linux-ops",
+  "version": "2.0.0",
+  "description": "Agent-native Linux 操作 skill，通过 SSH 提供系统、文件、进程、网络、包管理、服务、传输、锁等可组合 primitives；面向 AI 大模型推理驱动的无人值守运维，支持自治等级、decision record、Python runtime agent gate、严格决策校验、语义防护（JSON rules，fail-closed）、自治策略校验、mock execute/verify/rollback 测试矩阵（test-mode）、审计 schema（含 decision/policy/rules hash）、组合观测（gate-aware）、升级通知、路径防护、risk mismatch 检测、批量并发、策略拦截、脱敏、审计、显式 sudo 重试和 inventory 校验。",
+  "description_en": "Agent-native Linux operations skill over SSH, providing composable primitives for system, file, process, network, package, service, transfer, and lock operations. v2.0 with Python gate, JSON primitive rules (fail-closed on unknown primitives, corrupt rules, and mismatch), semantic guard, path policy guard, risk mismatch detection, test-mode for tests, composite observations with gate awareness, built-in escalation with webhook, decision/policy/rules audit hashing, and structured schemas for gate results, run summaries, and escalation events.",
+  "about_en": "AI-native SSH/Linux ops v2.0: Python runtime gate, fail-closed semantic guard, JSON rules, path/risk guards, composite observations, built-in escalation, audit hashing, structured schemas.",
+  "author": "kakahu2015",
+  "license": "MIT",
+  "keywords": ["linux", "ssh", "remote", "server", "scp", "vps", "devops", "agent", "ai-agent", "autonomy", "unattended", "runtime-gate", "decision-record", "policy-validation", "semantic-guard", "fail-closed", "path-guard", "risk-mismatch", "test-mode", "composite-observations", "escalation", "batch", "ops", "v2"],
+  "categories": ["devops", "server", "linux", "ai-agent", "autonomy", "runtime-gate"],
+  "requires": {
+    "bins": ["ssh", "scp", "bash", "awk", "sed", "grep", "python3"]
+  },
+  "optional": {
+    "bins": ["sshpass", "timeout", "curl"]
+  },
+  "minClawVersion": "0.1.0"
+}

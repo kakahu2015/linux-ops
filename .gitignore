@@ -1,0 +1,19 @@
+# Local inventory, autonomy policy, and secrets
+hosts.yaml
+autonomy.yaml
+.secrets/*
+!.secrets/
+!.secrets/*.example
+!.secrets/host.env.example
+
+# Runtime state
+.runs/
+.audit/
+.state/
+*.sock
+
+# OS/editor noise
+.DS_Store
+*.swp
+*.tmp
+__pycache__/

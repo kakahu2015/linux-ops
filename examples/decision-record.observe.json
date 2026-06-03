@@ -1,0 +1,37 @@
+{
+  "intent": "collect bounded host summary for triage",
+  "autonomy_level": "L1",
+  "target_scope": {
+    "hosts": ["demo-edge-01"],
+    "environment": "dev"
+  },
+  "observations": [
+    "target host selected from inventory metadata",
+    "requested operation is read-only and bounded"
+  ],
+  "hypothesis": "basic host summary is needed before any diagnosis or change",
+  "risk": "low",
+  "action": {
+    "primitive": "sys.sh",
+    "args": ["demo-edge-01", "summary"],
+    "command": "sys.sh <host> summary",
+    "expected_effect": "return bounded system summary JSON"
+  },
+  "guardrails": {
+    "requires_confirmation": false,
+    "requires_lock": false,
+    "rollback_available": false,
+    "policy_risk": "low",
+    "max_hosts": 1,
+    "timeout_sec": 30,
+    "output_limit": "primitive bounded output"
+  },
+  "verification": [
+    "agent_gate dry-run validates autonomy level, risk, primitive, host count, and policy boundary"
+  ],
+  "verification_actions": [],
+  "rollback": [],
+  "rollback_actions": [],
+  "stop_condition": "dry-run gate succeeds or reports an autonomy/policy/schema error",
+  "confidence": "high"
+}

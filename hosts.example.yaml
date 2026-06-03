@@ -1,0 +1,31 @@
+# OpenClaw SSH Skill - example host inventory
+#
+# Copy this file to hosts.yaml for local use. Keep hosts.yaml out of git.
+# `hosts.yaml` 只放别名；真实 IP、真实 key 路径、密码、token 都放 `.secrets/<name>.env`。
+
+hosts:
+  demo-edge-01:
+    host: demo-edge-01                  # 别名；真实 HOST 放 .secrets/demo-edge-01.env
+    port: 22
+    user: ubuntu
+    auth: key
+    key_path: /keys/demo-edge-01        # 占位写法；真实 KEY_PATH 放 .secrets/demo-edge-01.env
+    default_workdir: /opt/app
+    provider: demo
+    region: demo
+    env: demo
+    role: edge
+    tags: [demo, edge]
+
+  demo-worker-01:
+    host: demo-worker-01
+    port: 22
+    user: ubuntu
+    auth: key
+    key_path: /keys/demo-worker-01
+    default_workdir: /opt/worker
+    provider: demo
+    region: demo
+    env: demo
+    role: worker
+    tags: [demo, worker]

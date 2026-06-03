@@ -1,0 +1,32 @@
+name: Shell CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: |
+          bash -n scripts/*.sh tests/*.sh
+          python3 -m py_compile scripts/validate_decision.py scripts/validate_autonomy.py scripts/agent_gate.py scripts/redact.py
+      - name: Validate example inventory
+        run: bash scripts/validate_hosts.sh hosts.example.yaml
+      - name: Validate autonomy policy example
+        run: python3 scripts/validate_autonomy.py autonomy.example.yaml --quiet
+      - name: Validate decision record example
+        run: python3 scripts/validate_decision.py examples/decision-record.observe.json --quiet
+      - name: Validate generic agent gate dry-run
+        run: bash scripts/agent_gate.sh --decision examples/decision-record.observe.json --policy autonomy.example.yaml --dry-run
+      - name: Run generic agent gate tests
+        run: bash tests/agent_gate_tests.sh
+      - name: ShellCheck advisory
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh tests/*.sh

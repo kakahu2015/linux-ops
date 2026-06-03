@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kakahu2015/ssh-skill/schemas/decision-record.schema.json",
+  "title": "SSH Skill Agent Decision Record",
+  "description": "A concise, auditable operational decision summary for AI-agent-driven SSH operations. This is not a chain-of-thought log and must not contain credentials or private infrastructure identifiers.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "intent",
+    "autonomy_level",
+    "observations",
+    "hypothesis",
+    "risk",
+    "action",
+    "guardrails",
+    "verification",
+    "stop_condition",
+    "confidence"
+  ],
+  "properties": {
+    "intent": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The operational goal, stated generically and without secrets."
+    },
+    "autonomy_level": {
+      "type": "string",
+      "enum": ["L0", "L1", "L2", "L3", "L4", "L5"],
+      "description": "Autonomy level according to docs/agent-autonomy.md."
+    },
+    "target_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "selector": {
+          "type": "string",
+          "description": "Optional selector expression, e.g. tag=production,role=edge."
+        },
+        "environment": {
+          "type": "string",
+          "description": "Observed or inventory-derived environment such as dev, staging, prod."
+        }
+      }
+    },
+    "observations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Bounded, evidence-based observations from primitives."
+    },
+    "hypothesis": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The current best explanation. Must be treated as provisional until verified."
+    },
+    "risk": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "forbidden"],
+      "description": "Operational risk classification."
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primitive"],
+      "properties": {
+        "primitive": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+\\.sh$",
+          "description": "Primitive script to use, e.g. sys.sh, service.sh, runner.sh. No path separators."
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Argument vector, excluding shell-expanded secrets."
+        },
+        "command": {
+          "type": "string",
+          "description": "Human-readable command summary. Must not include credentials or private infrastructure identifiers."
+        },
+        "expected_effect": {
+          "type": "string",
+          "description": "Expected state change or observation result."
+        }
+      }
+    },
+    "guardrails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requires_confirmation", "requires_lock", "rollback_available"],
+      "properties": {
+        "requires_confirmation": { "type": "boolean" },
+        "requires_lock": { "type": "boolean" },
+        "rollback_available": { "type": "boolean" },
+        "policy_risk": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "forbidden"]
+        },
+        "max_hosts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeout_sec": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_limit": {
+          "type": "string",
+          "description": "Bounded output rule, e.g. primitive limit 50 or tail -100."
+        }
+      }
+    },
+    "verification": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Post-action checks in natural-language summary form. State-changing actions must define verification."
+    },
+    "verification_actions": {
+      "type": "array",
+      "description": "Optional executable primitive checks for agent_gate.sh. These must remain generic primitives, not business workflows.",
+      "items": {
+        "$ref": "#/$defs/primitive_action"
+      }
+    },
+    "rollback": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Optional rollback step summaries or references to backups."
+    },
+    "rollback_actions": {
+      "type": "array",
+      "description": "Optional executable primitive rollback actions for agent_gate.sh. These must remain generic primitives, not business workflows.",
+      "items": {
+        "$ref": "#/$defs/primitive_action"
+      }
+    },
+    "stop_condition": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Condition under which the Agent stops instead of continuing autonomous actions."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"],
+      "description": "Confidence in the hypothesis-action pair, based on live observations."
+    },
+    "escalation_reason": {
+      "type": "string",
+      "description": "Reason to ask a human or require explicit confirmation."
+    }
+  },
+  "$defs": {
+    "primitive_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primitive"],
+      "properties": {
+        "primitive": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+\\.sh$"
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "expected_effect": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

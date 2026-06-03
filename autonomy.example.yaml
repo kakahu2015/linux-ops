@@ -1,0 +1,128 @@
+# Example autonomy policy for AI-agent-driven SSH operations.
+#
+# Copy to autonomy.yaml for local use if you want unattended operation.
+# Keep production defaults conservative. This file describes what the Agent may do;
+# it is not a task script or workflow runner.
+
+version: 1
+
+default_level: L1
+
+levels:
+  L0:
+    name: advisory
+    remote_execution: false
+    description: Explain, plan, and ask for permission. No remote execution.
+
+  L1:
+    name: observe
+    remote_execution: true
+    allowed_risk: low
+    read_only: true
+    description: Read-only observations using bounded primitives.
+
+  L2:
+    name: safe-self-heal
+    remote_execution: true
+    allowed_risk: low
+    read_only: false
+    requires_verification: true
+    description: Low-risk reversible actions such as reconnecting SSH control sockets or creating backups.
+
+  L3:
+    name: bounded-change
+    remote_execution: true
+    allowed_risk: medium
+    read_only: false
+    requires_verification: true
+    requires_rollback_when_possible: true
+    description: Bounded non-production changes with explicit verification.
+
+  L4:
+    name: privileged-or-prod-impacting
+    remote_execution: true
+    allowed_risk: high
+    requires_confirmation: true
+    description: Requires explicit human confirmation or external approval.
+
+  L5:
+    name: forbidden
+    remote_execution: false
+    description: Never execute unattended.
+
+environments:
+  prod:
+    max_unattended_level: L1
+    medium_risk_requires_confirmation: true
+    high_risk_requires_confirmation: true
+    require_canary_for_fleet_changes: true
+
+  staging:
+    max_unattended_level: L2
+    medium_risk_requires_confirmation: true
+    high_risk_requires_confirmation: true
+
+  dev:
+    max_unattended_level: L3
+    medium_risk_requires_confirmation: false
+    high_risk_requires_confirmation: true
+
+unattended_defaults:
+  max_hosts: 1
+  max_parallel: 5
+  per_host_timeout_sec: 30
+  output_limit_lines: 100
+  require_decision_record: true
+  decision_record_schema: schemas/decision-record.schema.json
+  require_post_action_verification: true
+  stop_on_policy_block: true
+  stop_on_failed_verification: true
+  stop_on_conflicting_evidence: true
+
+allowed_unattended_primitives:
+  L1:
+    - sys.sh
+    - facts.sh
+    - patrol.sh
+    - file.sh:exists
+    - file.sh:stat
+    - file.sh:list
+    - file.sh:head
+    - file.sh:tail
+    - file.sh:grep
+    - file.sh:checksum
+    - proc.sh:top
+    - proc.sh:mem
+    - proc.sh:find
+    - proc.sh:tree
+    - net.sh:ports
+    - net.sh:listen
+    - net.sh:dns
+    - net.sh:route
+    - net.sh:addr
+    - pkg.sh:detect
+    - pkg.sh:installed
+    - service.sh:status
+    - service.sh:logs
+
+  L2:
+    - lock.sh:status
+    - file.sh:backup
+    - exec.sh:read_only_bounded
+
+  L3:
+    - service.sh:restart
+    - service.sh:reload
+    - pkg.sh:update-cache
+
+always_escalate:
+  - production medium-risk or high-risk actions
+  - any action requiring sudo on production
+  - service stop, disable, or mask
+  - firewall changes
+  - disk formatting, partitioning, or raw device writes
+  - recursive deletion outside explicitly approved temp paths
+  - private key, credential, or secrets access
+  - broad fleet changes without canary
+  - missing rollback for non-trivial state changes
+  - failed or ambiguous verification
