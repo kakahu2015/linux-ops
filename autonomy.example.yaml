@@ -79,41 +79,40 @@ unattended_defaults:
   stop_on_failed_verification: true
   stop_on_conflicting_evidence: true
 
+# Descriptive policy contract. The current runtime gate also applies its
+# fail-closed built-in primitive allowlist and constitutional checks.
 allowed_unattended_primitives:
   L1:
     - sys.sh
     - facts.sh
     - patrol.sh
-    - file.sh:exists
-    - file.sh:stat
-    - file.sh:list
-    - file.sh:head
-    - file.sh:tail
-    - file.sh:grep
-    - file.sh:checksum
-    - proc.sh:top
-    - proc.sh:mem
-    - proc.sh:find
-    - proc.sh:tree
-    - net.sh:ports
-    - net.sh:listen
-    - net.sh:dns
-    - net.sh:route
-    - net.sh:addr
-    - pkg.sh:detect
-    - pkg.sh:installed
-    - service.sh:status
-    - service.sh:logs
-
+    - "file.sh:exists"
+    - "file.sh:stat"
+    - "file.sh:list"
+    - "file.sh:head"
+    - "file.sh:tail"
+    - "file.sh:grep"
+    - "file.sh:checksum"
+    - "proc.sh:top"
+    - "proc.sh:mem"
+    - "proc.sh:find"
+    - "proc.sh:tree"
+    - "net.sh:ports"
+    - "net.sh:listen"
+    - "net.sh:dns"
+    - "net.sh:route"
+    - "net.sh:addr"
+    - "pkg.sh:detect"
+    - "pkg.sh:installed"
+    - "service.sh:status"
+    - "service.sh:logs"
   L2:
-    - lock.sh:status
-    - file.sh:backup
-    - exec.sh:read_only_bounded
-
+    - "lock.sh:status"
+    - "file.sh:backup"
   L3:
-    - service.sh:restart
-    - service.sh:reload
-    - pkg.sh:update-cache
+    - "service.sh:restart"
+    - "service.sh:reload"
+    - "pkg.sh:update-cache"
 
 always_escalate:
   - production medium-risk or high-risk actions

@@ -119,8 +119,14 @@ POLICY_LOCAL_YAML="${POLICY_LOCAL_YAML:-$SCRIPTS_DIR/policy.local.yaml}"
 policy_check_command() {
     local cmd="$1" host_count="${2:-1}" confirm="${3:-}" host_csv="${4:-}"
     local confirm_fleet_flag="" confirm_prod_flag=""
+    local confirm_path_flag=""
+    local confirm_risk_flag=""
+    local confirm_single_flag=""
     [[ "$confirm" == "--confirm" || "$confirm" == "--confirm-fleet" || "${SSH_SKILL_CONFIRMED:-}" == yes ]] && confirm_fleet_flag="--confirm-fleet"
     [[ "$confirm" == "--confirm" || "$confirm" == "--confirm-prod"  || "${SSH_SKILL_CONFIRMED:-}" == yes ]] && confirm_prod_flag="--confirm-prod"
+    [[ "${SSH_SKILL_CONFIRM_PATH:-}" == yes ]] && confirm_path_flag="--confirm-path"
+    [[ "${SSH_SKILL_CONFIRM_RISK:-}" == yes ]] && confirm_risk_flag="--confirm-risk"
+    [[ "${SSH_SKILL_CONFIRM_PATH:-}" == yes ]] && confirm_single_flag="--confirm"
 
     local result
     result=$(python3 "$SCRIPTS_DIR/agent_gate.py" \
@@ -129,6 +135,9 @@ policy_check_command() {
         --host-csv "$host_csv" \
         ${confirm_fleet_flag:+"$confirm_fleet_flag"} \
         ${confirm_prod_flag:+"$confirm_prod_flag"} \
+        ${confirm_path_flag:+"$confirm_path_flag"} \
+        ${confirm_risk_flag:+"$confirm_risk_flag"} \
+        ${confirm_single_flag:+"$confirm_single_flag"} \
         2>/dev/null)
     local rc=$?
     if [[ $rc -ne 0 ]]; then

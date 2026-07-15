@@ -5,6 +5,7 @@
 #   bash pkg.sh <host> search <name> [limit]
 #   bash pkg.sh <host> installed <name>
 #   bash pkg.sh <host> install <name> --confirm
+#   bash pkg.sh <host> remove <name> --confirm
 #   bash pkg.sh <host> update-cache --confirm
 set -euo pipefail
 
@@ -70,7 +71,14 @@ case "$ACTION" in
         N="$(q "$NAME")"
         run_pkg_cmd "pm=\$($DETECT_CMD); case \$pm in apt) sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $N ;; dnf|yum) sudo \$pm install -y $N ;; apk) sudo apk add $N ;; pacman) sudo pacman -S --noconfirm $N ;; *) echo unsupported_pkg_manager=\$pm; exit 2 ;; esac" "install"
         ;;
+    remove)
+        NAME="${1:?remove 缺少包名}"
+        [[ "$NAME" =~ ^[A-Za-z0-9_.+:-]+$ ]] || die_json "invalid_package" "包名包含非法字符: $NAME" "$HOST_NAME"
+        [[ "$CONFIRM_FLAG" == "--confirm" || "${SSH_SKILL_CONFIRMED:-}" == "yes" ]] || die_json "confirm_required" "remove 会修改系统，需要 --confirm 或 SSH_SKILL_CONFIRMED=yes" "$HOST_NAME"
+        N="$(q "$NAME")"
+        run_pkg_cmd "pm=\$($DETECT_CMD); case \$pm in apt) sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y $N && sudo DEBIAN_FRONTEND=noninteractive apt-get autoremove -y ;; dnf|yum) sudo \$pm remove -y $N || sudo rpm -e --noscripts $N; sudo \$pm autoremove -y ;; apk) sudo apk del $N ;; pacman) sudo pacman -Rns --noconfirm $N ;; *) echo unsupported_pkg_manager=\$pm; exit 2 ;; esac" "remove"
+        ;;
     *)
-        die_json "invalid_action" "pkg action 支持: detect search installed update-cache install" "$HOST_NAME"
+        die_json "invalid_action" "pkg action 支持: detect search installed update-cache install remove" "$HOST_NAME"
         ;;
 esac

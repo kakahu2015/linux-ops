@@ -272,7 +272,12 @@ def load_yaml_subset(path: Path) -> dict[str, Any]:
             if not isinstance(parent, list):
                 raise ValueError(f"line {lineno}: list item without list parent")
             rest = line[2:].strip()
-            if ":" in rest:
+            quoted_scalar = (
+                len(rest) >= 2
+                and rest[0] == rest[-1]
+                and rest[0] in {"'", '"'}
+            )
+            if ":" in rest and not quoted_scalar:
                 # list item that is itself a mapping (e.g. "- id: foo")
                 item: dict[str, Any] = {}
                 parent.append(item)
@@ -327,6 +332,7 @@ class AutonomyPolicy:
         self.env_max_levels: dict[str, str] = {}
         self.max_hosts = 1
         self.require_verification = True
+        self.allowed_unattended: dict[str, list[str]] = {}
         self._parse()
 
     def _parse(self) -> None:
@@ -356,8 +362,35 @@ class AutonomyPolicy:
                     if isinstance(level, str):
                         self.env_max_levels[env_name.lower()] = level
 
+        allowed = data.get("allowed_unattended_primitives", {})
+        if isinstance(allowed, dict):
+            self.allowed_unattended = {
+                str(level): [str(entry) for entry in entries]
+                for level, entries in allowed.items()
+                if isinstance(entries, list)
+            }
+
     def env_max_level(self, environment: str) -> str:
         return self.env_max_levels.get(environment, self.default_level)
+
+    def allows_unattended(self, level: str, primitive: str, args: list[str]) -> bool:
+        """Apply the configured allowlist as an additional restriction.
+
+        Built-in gate rules remain authoritative; policy cannot expand them.
+        A primitive entry allows all actions for that primitive, while an
+        entry with an action restricts the match to that primitive/action.
+        Lower autonomy levels are inherited by higher levels.
+        """
+        if not self.allowed_unattended:
+            return True
+        key = primitive_action_key(primitive, args)
+        current = level_num(level)
+        for candidate, entries in self.allowed_unattended.items():
+            if level_num(candidate) > current:
+                continue
+            if primitive in entries or key in entries:
+                return True
+        return False
 
 
 class DecisionRecord:
@@ -812,7 +845,11 @@ def main() -> None:
                  f"Command targets sensitive path: {path_violation}. "
                  f"Use --confirm-path to override.")
 
-    if not is_allowed_without_confirmation(decision.autonomy_level, decision.primitive, decision.args):
+    configured_allowed = policy.allows_unattended(
+        decision.autonomy_level, decision.primitive, decision.args,
+    )
+    if (not is_allowed_without_confirmation(decision.autonomy_level, decision.primitive, decision.args)
+            or not configured_allowed):
         if not args.confirm_risk and not args.test_mode:
             key = primitive_action_key(decision.primitive, decision.args)
             die_json("autonomy_blocked",
