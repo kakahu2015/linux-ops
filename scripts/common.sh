@@ -148,6 +148,15 @@ policy_check_command() {
     fi
 }
 
+policy_risk_for_command() {
+    local cmd="$1" result
+    result=$(python3 "$SCRIPTS_DIR/agent_gate.py" --policy-check "$cmd" \
+        --host-count 1 --confirm-risk --confirm-fleet --confirm-prod --confirm-path 2>/dev/null || true)
+    printf '%s' "$result" | python3 -c 'import json,sys;
+try: print(json.load(sys.stdin).get("risk", "unknown"))
+except Exception: print("unknown")'
+}
+
 # Structured primitive gate. The primitive name/action/arguments remain intact
 # all the way to Python; raw command policy is reserved for exec.sh.
 gate_action() {
@@ -161,6 +170,7 @@ gate_action() {
         [[ -n "${h// /}" ]] && cmd+=(--host "$(echo "$h" | xargs)")
     done
     for action_arg in "$@"; do cmd+=(--arg "$action_arg"); done
+    [[ "$primitive" == "exec.sh" && "${SSH_SKILL_ALLOW_RAW_EXEC:-}" == yes ]] && cmd+=(--allow-raw-exec)
     [[ "${SSH_SKILL_CONFIRM_RISK:-}" == yes ]] && cmd+=(--confirm-risk)
     [[ "${SSH_SKILL_CONFIRM_PATH:-}" == yes ]] && cmd+=(--confirm-path)
     [[ "${SSH_SKILL_CONFIRM_FLEET:-}" == yes ]] && cmd+=(--confirm-fleet)

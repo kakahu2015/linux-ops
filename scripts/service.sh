@@ -7,21 +7,24 @@ set -euo pipefail
 HOST_NAMES="${1:?用法: service.sh <host|host1,host2,...> <action> [service_name] [--confirm]}"
 ACTION="${2:?缺少操作: start|stop|restart|status|logs|enable|disable}"
 SERVICE_NAME="${3:-caddy}"
-CONFIRM_FLAG="${4:-}"
+CONFIRM_FLAGS=()
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
 
-case "$CONFIRM_FLAG" in
-  --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes ;;
-  --confirm-path) SSH_SKILL_CONFIRM_PATH=yes ;;
-  --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes ;;
-  --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes ;;
-  --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes ;;
-  "") ;;
-  *) die_json "invalid_confirmation" "只允许使用独立确认参数" "$HOST_NAMES" ;;
-esac
+shift 3
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes; CONFIRM_FLAGS+=("$1") ;;
+    --confirm-path) SSH_SKILL_CONFIRM_PATH=yes; CONFIRM_FLAGS+=("$1") ;;
+    --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes; CONFIRM_FLAGS+=("$1") ;;
+    --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes; CONFIRM_FLAGS+=("$1") ;;
+    --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes; CONFIRM_FLAGS+=("$1") ;;
+    *) die_json "invalid_confirmation" "只允许使用独立确认参数" "$HOST_NAMES" ;;
+  esac
+  shift
+done
 
 # Validate before use: SERVICE_NAME is interpolated directly into CMD below.
 # This regex is the only barrier preventing shell injection through $SERVICE_NAME.
@@ -57,8 +60,7 @@ esac
 gate_action service.sh direct "$HOST_NAMES" "$ACTION" "$SERVICE_NAME"
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 
-EXEC_FLAGS=()
-[[ -n "$CONFIRM_FLAG" ]] && EXEC_FLAGS+=("$CONFIRM_FLAG")
+EXEC_FLAGS=("${CONFIRM_FLAGS[@]}")
 
 set +e
 RESULT=$(SSH_SKILL_STRUCTURED_GATE=yes SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/exec.sh" "$HOST_NAMES" "$CMD" "${EXEC_FLAGS[@]}")

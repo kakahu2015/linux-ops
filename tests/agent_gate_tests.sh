@@ -52,6 +52,13 @@ expect_failure_contains() {
 
 write_decision() {
   local path="$1" level="$2" risk="$3" env="$4" primitive="$5" args_json="$6" max_hosts="$7" requires_confirmation="$8" hosts_json="$9"
+  args_json="${args_json//demo-host-01/demo-edge-01}"
+  args_json="${args_json//demo-host-02/demo-worker-01}"
+  hosts_json="${hosts_json//demo-host-01/demo-edge-01}"
+  hosts_json="${hosts_json//demo-host-02/demo-worker-01}"
+  if [[ "$hosts_json" == *demo-worker-01* ]]; then
+    args_json="${args_json/demo-edge-01/demo-edge-01,demo-worker-01}"
+  fi
   cat >"$path" <<JSON
 {
   "intent": "generic gate test",
@@ -95,7 +102,7 @@ write_mock_decision() {
   "intent": "generic mock execution test",
   "autonomy_level": "$level",
   "target_scope": {
-    "hosts": ["demo-host-01"],
+  "hosts": ["demo-edge-01"],
     "environment": "dev"
   },
   "observations": ["generic mock primitive selected"],
@@ -103,7 +110,7 @@ write_mock_decision() {
   "risk": "$risk",
   "action": {
     "primitive": "$action",
-    "args": ["action"],
+    "args": ["demo-edge-01", "action"],
     "command": "$action action",
     "expected_effect": "mock action result"
   },
@@ -118,14 +125,14 @@ write_mock_decision() {
   },
   "verification": ["mock verification primitive returns expected result"],
   "verification_actions": [
-    {"primitive": "$verify", "args": ["verify"], "expected_effect": "mock verification result"}
+    {"primitive": "$verify", "args": ["demo-edge-01", "verify"], "expected_effect": "mock verification result"}
   ],
   "rollback": ["run generic rollback primitive if verification fails"],
   "rollback_actions": [
-    {"primitive": "$rollback", "args": ["rollback"], "expected_effect": "mock rollback result"}
+    {"primitive": "$rollback", "args": ["demo-edge-01", "rollback"], "expected_effect": "mock rollback result"}
   ],
   "rollback_verification_actions": [
-    {"primitive": "generic_success.sh", "args": ["verify"], "expected_effect": "mock rollback restored state"}
+    {"primitive": "generic_success.sh", "args": ["demo-edge-01", "verify"], "expected_effect": "mock rollback restored state"}
   ],
   "stop_condition": "mock execution completes or fails as expected",
   "confidence": "high"
@@ -223,7 +230,7 @@ expect_failure_contains \
   "agent_gate runs rollback when verification fails" \
   "verification_failed" \
   bash "$ROOT/scripts/agent_gate.sh" --decision "$MOCK_VERIFY_FAIL_DECISION" --policy "$ROOT/autonomy.example.yaml" --execute --test-mode --rollback-on-failed-verification
-if grep -q '^rollback:rollback$' "$AGENT_GATE_TEST_STATE"; then
+if grep -q '^rollback:demo-edge-01 rollback$' "$AGENT_GATE_TEST_STATE"; then
   pass "rollback primitive recorded state"
 else
   cat "$AGENT_GATE_TEST_STATE" >&2 || true

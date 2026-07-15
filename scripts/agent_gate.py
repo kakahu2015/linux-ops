@@ -59,6 +59,32 @@ class ActionAssessment:
     reasons: list[str] = field(default_factory=list)
 
 
+def extract_action_hosts(action: ActionSpec) -> list[str]:
+    """Extract the host vector encoded in the first primitive argument."""
+    if not action.args:
+        return []
+    return [host.strip() for host in action.args[0].split(",") if host.strip()]
+
+
+def validate_action_targets(
+    action: ActionSpec,
+    declared_hosts: list[str],
+    inventory: Inventory,
+) -> list[str]:
+    actual_hosts = extract_action_hosts(action)
+    declared = {host.strip() for host in declared_hosts if host.strip()}
+    if not actual_hosts:
+        return ["action_target_missing"]
+    if action.phase in {"execute", "direct"} and set(actual_hosts) != declared:
+        return ["action_target_scope_mismatch"]
+    if action.phase in {"verify", "rollback"} and not set(actual_hosts).issubset(declared):
+        return ["action_target_scope_mismatch"]
+    for host in actual_hosts:
+        if host not in inventory.hosts:
+            return [f"unknown_host: {host}"]
+    return []
+
+
 class Inventory:
     """Small, fail-closed inventory reader for production target attributes."""
 
@@ -86,6 +112,17 @@ class Inventory:
             tags = [tags]
         tags_lower = {str(tag).lower() for tag in tags} if isinstance(tags, list) else set()
         return env in {"prod", "production"} or bool(tags_lower & {"prod", "production"})
+
+    def environment_for_hosts(self, aliases: list[str]) -> str:
+        environments = {str(self.hosts.get(alias, {}).get("env", "unknown")).lower()
+                        for alias in aliases}
+        if environments & {"prod", "production"}:
+            return "prod"
+        if "staging" in environments:
+            return "staging"
+        if environments:
+            return next(iter(environments))
+        return "unknown"
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -685,6 +722,8 @@ class SemanticGuard:
         commands = rule.get("commands", {})
         if isinstance(commands, dict) and isinstance(commands.get(command), dict):
             return commands[command]
+        if isinstance(commands, dict) and isinstance(commands.get("*"), dict):
+            return commands["*"]
         return {}
 
     def is_mutating(self, primitive: str, args: list[str]) -> bool:
@@ -731,6 +770,9 @@ def preflight_action(
     path_guard: PathPolicyGuard,
     confirmations: ConfirmationSet,
     autonomy_level: str | None,
+    environment_max_level: str | None = None,
+    effective_max_hosts: int | None = None,
+    declared_hosts: list[str] | None = None,
     primitives_dir: Path | None = None,
     inventory: Inventory | None = None,
     test_mode: bool = False,
@@ -745,6 +787,12 @@ def preflight_action(
         phase=action.phase,
         host_count=len(hosts),
     )
+    if inventory is not None and declared_hosts is not None:
+        assessment.reasons.extend(validate_action_targets(action, declared_hosts, inventory))
+        actual_hosts = extract_action_hosts(action)
+        if actual_hosts:
+            hosts = actual_hosts
+            assessment.host_count = len(actual_hosts)
     if primitives_dir is not None and not (primitives_dir / action.primitive).is_file():
         assessment.reasons.append("unknown_primitive")
 
@@ -752,14 +800,15 @@ def preflight_action(
     if (not valid and not test_mode
             and not (confirmations.risk and "not allowed unattended" in semantic_error)):
         assessment.reasons.append(f"semantic_blocked: {semantic_error}")
+    if (action.primitive in semantic_guard.rules
+            and action.primitive != "exec.sh"
+            and not semantic_guard.command_rule(action.primitive, action.args)
+            and not test_mode):
+        assessment.reasons.append("incomplete_rule: command requires explicit risk, mutating, and allowed_phases")
 
     assessment.risk = semantic_guard.compute_risk(action.primitive, action.args)
     assessment.mutating = semantic_guard.is_mutating(action.primitive, action.args)
-    assessment.prod_target = (
-        action.environment.lower() in {"prod", "production"}
-        or any(inventory.is_production(host) for host in hosts) if inventory else
-        action.environment.lower() in {"prod", "production"}
-    )
+    assessment.prod_target = any(inventory.is_production(host) for host in hosts) if inventory else False
     assessment.path_violation = path_guard.check(
         f"{action.primitive} {' '.join(shlex.quote(arg) for arg in action.args)}"
     )
@@ -784,7 +833,12 @@ def preflight_action(
     if not test_mode and not policy.allows_unattended(level, action.primitive, action.args) and not confirmations.risk:
         assessment.reasons.append("autonomy_blocked")
 
-    max_hosts = policy.max_hosts
+    if (environment_max_level is not None
+            and level_num(level) > level_num(environment_max_level)
+            and not confirmations.risk):
+        assessment.reasons.append("environment_level_confirmation_required")
+
+    max_hosts = effective_max_hosts if effective_max_hosts is not None else policy.max_hosts
     if assessment.host_count > max_hosts and not confirmations.fleet:
         assessment.reasons.append("fleet_confirmation_required")
     if assessment.prod_target and assessment.mutating and not confirmations.production:
@@ -918,7 +972,7 @@ def _run_structured_action_check(args: argparse.Namespace, scripts_dir: Path, sk
     inventory_path = Path(os.environ.get("HOSTS_YAML", str(skill_dir / "hosts.yaml")))
     inventory = Inventory(inventory_path)
     hosts = inventory.resolve_hosts(args.host)
-    action_args = list(hosts[:1]) + list(args.arg)
+    action_args = [",".join(hosts)] + list(args.arg)
     environment = "prod" if any(inventory.is_production(host) for host in hosts) else "dev"
     assessment = preflight_action(
         ActionSpec(args.primitive, action_args, hosts, environment, args.phase),
@@ -934,6 +988,9 @@ def _run_structured_action_check(args: argparse.Namespace, scripts_dir: Path, sk
             raw_exec=args.allow_raw_exec,
         ),
         autonomy_level=os.environ.get("AUTONOMY_LEVEL", policy.env_max_level(environment)),
+        environment_max_level=policy.env_max_level(environment),
+        effective_max_hosts=policy.max_hosts,
+        declared_hosts=hosts,
         primitives_dir=primitives_dir,
         inventory=inventory,
         test_mode=args.test_mode,
@@ -1019,12 +1076,21 @@ def main() -> None:
         production=args.confirm_prod, destructive=args.confirm_destructive,
         raw_exec=args.allow_raw_exec,
     )
+    effective_max_hosts = min(
+        policy.max_hosts,
+        decision.guardrail_max_hosts if decision.guardrail_max_hosts is not None else policy.max_hosts,
+    )
 
     def assess_or_block(action: ActionSpec) -> ActionAssessment:
+        actual_hosts = extract_action_hosts(action)
+        actual_environment = inventory.environment_for_hosts(actual_hosts)
         assessment = preflight_action(
             action, policy=policy, semantic_guard=semantic_guard,
             path_guard=path_guard, confirmations=confirmations,
             autonomy_level=decision.autonomy_level, primitives_dir=primitives_dir,
+            environment_max_level=policy.env_max_level(actual_environment),
+            effective_max_hosts=effective_max_hosts,
+            declared_hosts=decision.hosts,
             inventory=inventory, test_mode=args.test_mode,
         )
         if not assessment.allowed:
@@ -1036,6 +1102,9 @@ def main() -> None:
                 "fleet_confirmation_required": "autonomy_blocked",
                 "risk_confirmation_required": "autonomy_blocked",
                 "autonomy_blocked": "autonomy_blocked",
+                "environment_level_confirmation_required": "autonomy_blocked",
+                "action_target_missing": "action_target_missing",
+                "action_target_scope_mismatch": "action_target_scope_mismatch",
                 "verification_must_be_read_only": "verification_blocked",
                 "verification_exec_forbidden": "verification_blocked",
                 "raw_exec_blocked": "raw_exec_blocked",
@@ -1043,7 +1112,7 @@ def main() -> None:
                 "destructive_confirmation_required": "confirmation_required",
             }.get(reason.split(":", 1)[0], "action_blocked")
             if reason == "fleet_confirmation_required":
-                message = f"Host count {assessment.host_count} exceeds max_hosts {policy.max_hosts}. Use --confirm-fleet."
+                message = f"Host count {assessment.host_count} exceeds max_hosts {effective_max_hosts}. Use --confirm-fleet."
             elif reason == "production_confirmation_required":
                 message = "Production write target requires --confirm-prod."
             elif reason == "path_confirmation_required":
@@ -1062,15 +1131,24 @@ def main() -> None:
     if decision.requires_confirmation and not args.confirm_risk:
         die_json("confirmation_required", "Decision guardrails require --confirm-risk")
 
-    primary_assessment = assess_or_block(ActionSpec(
+    primary_action = ActionSpec(
         decision.primitive, decision.args, decision.hosts,
         decision.environment, "execute",
-    ))
-    computed_risk = primary_assessment.risk
-    if (computed_risk != "unknown" and risk_num(computed_risk) > decision.risk_num_val
+    )
+    effective_env_max_level = policy.env_max_level(
+        inventory.environment_for_hosts(extract_action_hosts(primary_action))
+    )
+    target_errors = validate_action_targets(primary_action, decision.hosts, inventory)
+    if target_errors:
+        die_json("action_target_scope_mismatch", "; ".join(target_errors))
+    declared_computed_risk = semantic_guard.compute_risk(decision.primitive, decision.args)
+    if (decision.primitive != "exec.sh" and declared_computed_risk != "unknown"
+            and risk_num(declared_computed_risk) > decision.risk_num_val
             and not args.confirm_risk):
         die_json("risk_mismatch",
-                 f"Decision declares risk={decision.risk} but primitive computed risk is {computed_risk}.")
+                 f"Decision declares risk={decision.risk} but primitive computed risk is {declared_computed_risk}.")
+    primary_assessment = assess_or_block(primary_action)
+    computed_risk = primary_assessment.risk
 
     # Verify and rollback are checked before any side effect. This is deliberately
     # done even for dry-run so an unsafe recovery path cannot hide behind execution.
@@ -1091,10 +1169,8 @@ def main() -> None:
         die_json("rollback_invalid", "rollback_available=true requires rollback_actions")
     if decision.guardrails.get("rollback_available") is False and decision.rollback_actions:
         die_json("rollback_invalid", "rollback_available=false cannot include rollback_actions")
-    if decision.rollback_actions and not decision.rollback_verification_declared:
-        die_json("rollback_invalid", "rollback_actions require rollback_verification_actions")
-
-    effective_max_hosts = decision.guardrail_max_hosts or policy.max_hosts
+    if decision.rollback_actions and not decision.rollback_verification_actions:
+        die_json("rollback_invalid", "rollback_actions require at least one rollback_verification_action")
 
     if policy.require_verification and args.execute and not args.test_mode:
         if decision.level_num_val >= 2 or decision.risk != "low":
@@ -1142,7 +1218,7 @@ def main() -> None:
             "autonomy_level": decision.autonomy_level,
             "policy_max_level": effective_env_max_level,
             "risk": decision.risk,
-            "environment": decision.environment,
+            "environment": inventory.environment_for_hosts(extract_action_hosts(primary_action)),
             "host_count": decision.host_count,
             "max_hosts": effective_max_hosts,
             "action": {
@@ -1175,7 +1251,7 @@ def main() -> None:
 
     start_ms = int(time.time() * 1000)
     action_rc, _, _ = run_primitive(
-        "execute", decision.primitive, decision.args, primitives_dir, capture=False,
+        "execute", decision.primitive, decision.args, primitives_dir, capture=True,
         timeout_sec=decision.timeout_sec, output_limit_bytes=decision.output_limit_bytes,
     )
     duration_ms = int(time.time() * 1000) - start_ms

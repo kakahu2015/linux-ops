@@ -5,14 +5,24 @@ set -euo pipefail
 
 HOST_NAMES="${1:?用法: exec.sh <host|host1,host2,...> <command> [confirmation] [--sudo]}"
 REMOTE_CMD="${2:?缺少命令参数}"
-CONFIRM_FLAG=""
+CONFIRM_FLAGS=()
 SUDO_RETRY=0
+SSH_SKILL_ALLOW_RAW_EXEC="${SSH_SKILL_ALLOW_RAW_EXEC:-}"
 
 shift 2
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --confirm-risk|--confirm-path|--confirm-fleet|--confirm-prod|--confirm-destructive)
-            CONFIRM_FLAG="$1"; shift ;;
+            case "$1" in
+                --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes ;;
+                --confirm-path) SSH_SKILL_CONFIRM_PATH=yes ;;
+                --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes ;;
+                --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes ;;
+                --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes ;;
+            esac
+            CONFIRM_FLAGS+=("$1"); shift ;;
+        --allow-raw-exec)
+            SSH_SKILL_ALLOW_RAW_EXEC=yes; shift ;;
         --confirm)
             echo '{"success":false,"error":"legacy_confirmation_rejected"}' >&2
             exit 2 ;;
@@ -31,8 +41,10 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPTS_DIR/common.sh"
 
 HOST_COUNT=$(host_count_from_csv "$HOST_NAMES")
+OUTPUT_LIMIT_BYTES="${OUTPUT_LIMIT_BYTES:-65536}"
 if [[ "${SSH_SKILL_STRUCTURED_GATE:-}" != yes ]]; then
-    policy_check_command "$REMOTE_CMD" "$HOST_COUNT" "$CONFIRM_FLAG" "$HOST_NAMES"
+    gate_action exec.sh direct "$HOST_NAMES" "$REMOTE_CMD"
+    policy_check_command "$REMOTE_CMD" "$HOST_COUNT" "" "$HOST_NAMES"
 fi
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 
@@ -44,7 +56,8 @@ if echo "$HOST_NAMES" | grep -q ','; then
     FAILED=0
     RESULTS=()
     PASS_FLAGS=()
-    [[ -n "$CONFIRM_FLAG" ]] && PASS_FLAGS+=("$CONFIRM_FLAG")
+    PASS_FLAGS+=("${CONFIRM_FLAGS[@]}")
+    [[ "${SSH_SKILL_ALLOW_RAW_EXEC:-}" == yes ]] && PASS_FLAGS+=("--allow-raw-exec")
     [[ "$SUDO_RETRY" -eq 1 ]] && PASS_FLAGS+=("--sudo")
 
     for HOST_NAME in "${HOSTS[@]}"; do
@@ -121,8 +134,12 @@ run_ssh "$FULL_CMD"
 EXIT_CODE=$?
 set -e
 
-STDOUT_CONTENT=$(cat "$STDOUT_FILE")
-STDERR_CONTENT=$(cat "$STDERR_FILE")
+STDOUT_SIZE=$(wc -c <"$STDOUT_FILE")
+STDERR_SIZE=$(wc -c <"$STDERR_FILE")
+STDOUT_CONTENT=$(head -c "$OUTPUT_LIMIT_BYTES" "$STDOUT_FILE")
+STDERR_CONTENT=$(head -c "$OUTPUT_LIMIT_BYTES" "$STDERR_FILE")
+TRUNCATED=false
+[[ "$STDOUT_SIZE" -gt "$OUTPUT_LIMIT_BYTES" || "$STDERR_SIZE" -gt "$OUTPUT_LIMIT_BYTES" ]] && TRUNCATED=true
 ERROR_FIELD=""
 SUDO_USED=false
 
@@ -133,15 +150,18 @@ if [[ $EXIT_CODE -ne 0 ]] && echo "$STDERR_CONTENT" | grep -qi "Permission denie
     if [[ "$SUDO_RETRY" -eq 1 || "${SSH_SKILL_ALLOW_SUDO_RETRY:-}" == "yes" ]]; then
         SUDO_CMD="sudo bash -lc $(printf '%q' "$FULL_CMD")"
         if [[ "${SSH_SKILL_STRUCTURED_GATE:-}" != yes ]]; then
-            policy_check_command "$SUDO_CMD" "$HOST_COUNT" "$CONFIRM_FLAG" "$HOST_NAME"
+        policy_check_command "$SUDO_CMD" "$HOST_COUNT" "" "$HOST_NAME"
         fi
         echo "[ssh-skill] 检测到权限不足，按显式授权尝试 sudo 重新执行..." >&2
         set +e
         run_ssh "$SUDO_CMD"
         EXIT_CODE=$?
         set -e
-        STDOUT_CONTENT=$(cat "$STDOUT_FILE")
-        STDERR_CONTENT=$(cat "$STDERR_FILE")
+        STDOUT_SIZE=$(wc -c <"$STDOUT_FILE")
+        STDERR_SIZE=$(wc -c <"$STDERR_FILE")
+        STDOUT_CONTENT=$(head -c "$OUTPUT_LIMIT_BYTES" "$STDOUT_FILE")
+        STDERR_CONTENT=$(head -c "$OUTPUT_LIMIT_BYTES" "$STDERR_FILE")
+        [[ "$STDOUT_SIZE" -gt "$OUTPUT_LIMIT_BYTES" || "$STDERR_SIZE" -gt "$OUTPUT_LIMIT_BYTES" ]] && TRUNCATED=true
         SUDO_USED=true
         [[ $EXIT_CODE -eq 0 ]] && ERROR_FIELD=""
     fi
@@ -172,6 +192,7 @@ cat <<JSON
   "requires_confirm": $([ -n "$ERROR_FIELD" ] && echo true || echo false),
   "stdout": "$(json_escape "$STDOUT_CONTENT")",
   "stderr": "$(json_escape "$STDERR_CONTENT")"
+  ,"truncated": $TRUNCATED
 }
 JSON
 
