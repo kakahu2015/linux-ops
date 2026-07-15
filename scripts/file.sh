@@ -23,16 +23,26 @@ source "$SCRIPTS_DIR/common.sh"
 
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 CONFIRM_FLAG=""
-if [[ "${*: -1}" == "--confirm" ]]; then
-    CONFIRM_FLAG="--confirm"
-fi
+GATE_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+      --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes ;;
+      --confirm-path) SSH_SKILL_CONFIRM_PATH=yes ;;
+      --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes ;;
+      --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes ;;
+      --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes ;;
+      --confirm) die_json "invalid_confirmation" "禁止使用 legacy --confirm" "$HOST_NAME" ;;
+      *) GATE_ARGS+=("$arg") ;;
+    esac
+done
+gate_action file.sh direct "$HOST_NAME" "$ACTION" "${GATE_ARGS[@]}"
 
 q() { printf '%q' "$1"; }
 
 run_file_cmd() {
     local cmd="$1" op="$2"
     set +e
-    RESULT=$(SSH_SKILL_CONFIRM_PATH="${ALLOW_PATH_CONFIRM:-}" SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/exec.sh" "$HOST_NAME" "$cmd" "$CONFIRM_FLAG")
+    RESULT=$(SSH_SKILL_STRUCTURED_GATE=yes SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/exec.sh" "$HOST_NAME" "$cmd" "$CONFIRM_FLAG")
     RC=$?
     set -e
     SUCCESS=$([ "$RC" -eq 0 ] && echo true || echo false)
@@ -107,9 +117,6 @@ case "$ACTION" in
         ;;
     remove|rm)
         PATH_ARG="${1:?remove 缺少 path}"
-        [[ "$CONFIRM_FLAG" == "--confirm" || "${SSH_SKILL_CONFIRMED:-}" == "yes" ]] || die_json "confirm_required" "remove 需要 --confirm 或 SSH_SKILL_CONFIRMED=yes" "$HOST_NAME"
-        ALLOW_PATH_CONFIRM=yes
-        SSH_SKILL_CONFIRM_RISK=yes
         P="$(q "$PATH_ARG")"
         run_file_cmd "rm -rf -- $P" "remove"
         ;;

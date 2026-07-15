@@ -8,6 +8,8 @@ runs generic verification/rollback primitives. Business-agnostic.
 from __future__ import annotations
 
 import argparse
+import atexit
+import fcntl
 import hashlib
 import json
 import os
@@ -18,9 +20,72 @@ import sys
 import tempfile
 import time
 import urllib.request
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+@dataclass
+class ConfirmationSet:
+    risk: bool = False
+    path: bool = False
+    fleet: bool = False
+    production: bool = False
+    destructive: bool = False
+    raw_exec: bool = False
+
+
+@dataclass
+class ActionSpec:
+    primitive: str
+    args: list[str]
+    hosts: list[str]
+    environment: str
+    phase: str  # execute / verify / rollback / direct
+
+
+@dataclass
+class ActionAssessment:
+    allowed: bool
+    primitive: str
+    args: list[str]
+    phase: str
+    risk: str = "unknown"
+    mutating: bool = False
+    prod_target: bool = False
+    host_count: int = 0
+    path_violation: str = ""
+    reasons: list[str] = field(default_factory=list)
+
+
+class Inventory:
+    """Small, fail-closed inventory reader for production target attributes."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.hosts: dict[str, dict[str, Any]] = {}
+        if not path.exists():
+            return
+        try:
+            data = load_yaml_subset(path)
+        except (OSError, ValueError) as exc:
+            die_json("inventory_load_failed", f"Failed to load inventory {path}: {exc}")
+        raw_hosts = data.get("hosts", {})
+        if isinstance(raw_hosts, dict):
+            self.hosts = {str(k): v for k, v in raw_hosts.items() if isinstance(v, dict)}
+
+    def resolve_hosts(self, aliases: list[str]) -> list[str]:
+        return [alias.strip() for alias in aliases if alias and alias.strip()]
+
+    def is_production(self, alias: str) -> bool:
+        record = self.hosts.get(alias, {})
+        env = str(record.get("env", "")).lower()
+        tags = record.get("tags", [])
+        if isinstance(tags, str):
+            tags = [tags]
+        tags_lower = {str(tag).lower() for tag in tags} if isinstance(tags, list) else set()
+        return env in {"prod", "production"} or bool(tags_lower & {"prod", "production"})
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -200,15 +265,20 @@ def write_audit_event(run_id: str, host: str, action: str, success: bool,
 
 
 def run_primitive(label: str, primitive: str, args: list[str],
-                  primitives_dir: Path, capture: bool = False) -> tuple[int, str, str]:
+                  primitives_dir: Path, capture: bool = False,
+                  timeout_sec: int | None = None,
+                  output_limit_bytes: int = 65536) -> tuple[int, str, str]:
     script = str(primitives_dir / primitive)
     cmd = [script] + args
     sys.stderr.write(f"[agent-gate] {label}: {primitive} {' '.join(shlex.quote(a) for a in args)}\n")
-    if capture:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return result.returncode, result.stdout, result.stderr
-    result = subprocess.run(cmd)
-    return result.returncode, "", ""
+    try:
+        if capture:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+            return result.returncode, result.stdout[:output_limit_bytes], result.stderr[:output_limit_bytes]
+        result = subprocess.run(cmd, timeout=timeout_sec)
+        return result.returncode, "", ""
+    except subprocess.TimeoutExpired as exc:
+        return 124, str(exc.stdout or "")[:output_limit_bytes], str(exc.stderr or "")[:output_limit_bytes]
 
 
 def _strip_yaml_comment(line: str) -> str:
@@ -413,8 +483,14 @@ class DecisionRecord:
         self.requires_confirmation: bool = self.guardrails.get("requires_confirmation", False)
         self.requires_lock: bool = self.guardrails.get("requires_lock", False)
         self.guardrail_max_hosts: int | None = self.guardrails.get("max_hosts", None)
+        self.timeout_sec: int | None = self.guardrails.get("timeout_sec")
+        self.verification_timeout_sec: int | None = self.guardrails.get("verification_timeout_sec", self.timeout_sec)
+        self.rollback_timeout_sec: int | None = self.guardrails.get("rollback_timeout_sec", self.timeout_sec)
+        self.output_limit_bytes: int = int(self.guardrails.get("output_limit_bytes", 65536))
         self.verification_actions: list[dict] = self.data.get("verification_actions", [])
         self.rollback_actions: list[dict] = self.data.get("rollback_actions", [])
+        self.rollback_verification_declared = "rollback_verification_actions" in self.data
+        self.rollback_verification_actions: list[dict] = self.data.get("rollback_verification_actions") or []
         self.stop_condition: str = self.data.get("stop_condition", "")
         self.observations: list[str] = self.data.get("observations", [])
 
@@ -454,8 +530,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Validate and print planned action without executing")
     parser.add_argument("--execute", action="store_true", default=False,
                         help="Execute action after gate checks")
-    parser.add_argument("--confirm", action="store_true", default=False,
-                        help="Legacy alias: enables all --confirm-* flags at once (deprecated, prefer specific flags)")
+    parser.add_argument("command", nargs="?", choices=["check-action"],
+                        help="Structured primitive gate mode")
     parser.add_argument("--confirm-risk", action="store_true", default=False,
                         help="Allow actions whose autonomy level or risk exceeds policy limits")
     parser.add_argument("--confirm-path", action="store_true", default=False,
@@ -464,6 +540,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Allow actions targeting more hosts than max_hosts policy")
     parser.add_argument("--confirm-prod", action="store_true", default=False,
                         help="Allow write actions targeting production environment")
+    parser.add_argument("--confirm-destructive", action="store_true", default=False,
+                        help="Allow explicitly destructive actions")
     parser.add_argument("--rollback-on-failed-verification", action="store_true", default=False,
                         help="Run rollback_actions if verification fails")
     parser.add_argument("--allow-raw-exec", action="store_true", default=False,
@@ -479,7 +557,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Number of target hosts (used with --policy-check)")
     parser.add_argument("--host-csv", default="",
                         help="Comma-separated host aliases (used with --policy-check)")
+    parser.add_argument("--primitive", default=None, help="Primitive for check-action")
+    parser.add_argument("--host", action="append", default=[], help="Target host for check-action")
+    parser.add_argument("--arg", action="append", default=[], help="Structured primitive argument")
+    parser.add_argument("--phase", choices=["execute", "verify", "rollback", "direct"],
+                        default="direct", help="Action phase for check-action")
     args = parser.parse_args(argv)
+
+    if args.command == "check-action":
+        if not args.primitive:
+            parser.error("--primitive is required with check-action")
+        return args
 
     if args.policy_check is None:
         if args.decision is None:
@@ -488,13 +576,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             parser.error("Cannot use both --dry-run and --execute")
         if not args.dry_run and not args.execute:
             args.dry_run = True
-
-    # --confirm is a legacy alias that expands to all specific flags
-    if args.confirm:
-        args.confirm_risk = True
-        args.confirm_path = True
-        args.confirm_fleet = True
-        args.confirm_prod = True
 
     return args
 
@@ -558,7 +639,19 @@ class SemanticGuard:
                 if not unattended:
                     return False, f"{primitive} does not support unattended execution"
             elif isinstance(unattended, dict):
-                level_allowed = unattended.get(autonomy_level, [])
+                # Higher autonomy levels inherit lower-level read-only/action
+                # allowlists; a level-specific list is additive, not replacing.
+                current = level_num(autonomy_level)
+                inherited: list[str] = []
+                level_allowed: Any = []
+                for candidate, entries in unattended.items():
+                    if level_num(str(candidate)) <= current:
+                        if entries is True:
+                            level_allowed = True
+                        elif isinstance(entries, list):
+                            inherited.extend(str(entry) for entry in entries)
+                if level_allowed is not True:
+                    level_allowed = inherited
                 if level_allowed is False or level_allowed == []:
                     return False, (
                         f"{primitive} not allowed unattended at {autonomy_level}"
@@ -576,12 +669,35 @@ class SemanticGuard:
     def compute_risk(self, primitive: str, args: list[str]) -> str:
         if primitive not in self.rules:
             return "unknown"
+        command_rule = self.command_rule(primitive, args)
+        if command_rule.get("risk"):
+            return str(command_rule["risk"])
         rule = self.rules[primitive]
         risk_by_cmd = rule.get("risk_by_command", {})
         if risk_by_cmd and len(args) > 1:
             cmd = args[1]
             return risk_by_cmd.get(cmd, risk_by_cmd.get("*", "low"))
         return rule.get("risk", "low")
+
+    def command_rule(self, primitive: str, args: list[str]) -> dict[str, Any]:
+        rule = self.rules.get(primitive, {})
+        command = args[1] if len(args) > 1 else (args[0] if args else "")
+        commands = rule.get("commands", {})
+        if isinstance(commands, dict) and isinstance(commands.get(command), dict):
+            return commands[command]
+        return {}
+
+    def is_mutating(self, primitive: str, args: list[str]) -> bool:
+        command_rule = self.command_rule(primitive, args)
+        if "mutating" in command_rule:
+            return bool(command_rule["mutating"])
+        return self.compute_risk(primitive, args) in {"medium", "high", "forbidden"}
+
+    def allowed_phases(self, primitive: str, args: list[str]) -> list[str]:
+        phases = self.command_rule(primitive, args).get("allowed_phases")
+        if isinstance(phases, list):
+            return [str(p) for p in phases]
+        return ["execute", "verify", "direct"] if not self.is_mutating(primitive, args) else ["execute", "rollback", "direct"]
 
 
 class PathPolicyGuard:
@@ -605,6 +721,84 @@ class PathPolicyGuard:
             if pattern.search(cmd):
                 return desc
         return ""
+
+
+def preflight_action(
+    action: ActionSpec,
+    *,
+    policy: AutonomyPolicy,
+    semantic_guard: SemanticGuard,
+    path_guard: PathPolicyGuard,
+    confirmations: ConfirmationSet,
+    autonomy_level: str | None,
+    primitives_dir: Path | None = None,
+    inventory: Inventory | None = None,
+    test_mode: bool = False,
+) -> ActionAssessment:
+    """The single gate for decision actions and direct primitive calls."""
+    level = autonomy_level or "L0"
+    hosts = inventory.resolve_hosts(action.hosts) if inventory else action.hosts
+    assessment = ActionAssessment(
+        allowed=True,
+        primitive=action.primitive,
+        args=action.args,
+        phase=action.phase,
+        host_count=len(hosts),
+    )
+    if primitives_dir is not None and not (primitives_dir / action.primitive).is_file():
+        assessment.reasons.append("unknown_primitive")
+
+    valid, semantic_error = semantic_guard.validate(action.primitive, action.args, level)
+    if (not valid and not test_mode
+            and not (confirmations.risk and "not allowed unattended" in semantic_error)):
+        assessment.reasons.append(f"semantic_blocked: {semantic_error}")
+
+    assessment.risk = semantic_guard.compute_risk(action.primitive, action.args)
+    assessment.mutating = semantic_guard.is_mutating(action.primitive, action.args)
+    assessment.prod_target = (
+        action.environment.lower() in {"prod", "production"}
+        or any(inventory.is_production(host) for host in hosts) if inventory else
+        action.environment.lower() in {"prod", "production"}
+    )
+    assessment.path_violation = path_guard.check(
+        f"{action.primitive} {' '.join(shlex.quote(arg) for arg in action.args)}"
+    )
+
+    allowed_phases = semantic_guard.allowed_phases(action.primitive, action.args)
+    if action.phase not in allowed_phases and not test_mode:
+        assessment.reasons.append(f"phase_not_allowed: {action.phase}")
+    if action.phase == "verify" and not test_mode:
+        if action.primitive == "exec.sh":
+            assessment.reasons.append("verification_exec_forbidden")
+        if assessment.mutating or assessment.risk != "low":
+            assessment.reasons.append("verification_must_be_read_only")
+    if action.primitive == "exec.sh" and not confirmations.raw_exec:
+        assessment.reasons.append("raw_exec_blocked")
+    if action.phase == "rollback" and assessment.risk == "forbidden":
+        assessment.reasons.append("rollback_forbidden")
+
+    if assessment.risk == "forbidden" and not test_mode:
+        assessment.reasons.append("forbidden_risk")
+    elif not test_mode and risk_num(assessment.risk) > level_risk_limit(level) and not confirmations.risk:
+        assessment.reasons.append("risk_confirmation_required")
+    if not test_mode and not policy.allows_unattended(level, action.primitive, action.args) and not confirmations.risk:
+        assessment.reasons.append("autonomy_blocked")
+
+    max_hosts = policy.max_hosts
+    if assessment.host_count > max_hosts and not confirmations.fleet:
+        assessment.reasons.append("fleet_confirmation_required")
+    if assessment.prod_target and assessment.mutating and not confirmations.production:
+        assessment.reasons.append("production_confirmation_required")
+    if assessment.path_violation and not confirmations.path:
+        assessment.reasons.append("path_confirmation_required")
+    command = action.args[1] if len(action.args) > 1 else ""
+    command_rule = semantic_guard.command_rule(action.primitive, action.args)
+    is_destructive = bool(command_rule.get("destructive")) or command in {"remove", "kill", "stop", "disable"}
+    if is_destructive and not confirmations.destructive:
+        assessment.reasons.append("destructive_confirmation_required")
+
+    assessment.allowed = not assessment.reasons
+    return assessment
 
 
 def _run_policy_check(args: argparse.Namespace, scripts_dir: Path, skill_dir: Path) -> None:
@@ -694,8 +888,7 @@ def _run_policy_check(args: argparse.Namespace, scripts_dir: Path, skill_dir: Pa
     if needs_confirm:
         bypass = (matched_action == "confirm_fleet" and confirmed_fleet) or \
                  (matched_action == "confirm_prod" and confirmed_prod) or \
-                 (matched_risk == "high" and confirmed_fleet) or \
-                 args.confirm
+                 (matched_risk in {"medium", "high"} and args.confirm_risk)
         if not bypass:
             flag_hint = "--confirm-fleet" if "fleet" in matched_action else "--confirm-prod"
             print(json.dumps({
@@ -717,6 +910,49 @@ def _run_policy_check(args: argparse.Namespace, scripts_dir: Path, skill_dir: Pa
     sys.exit(0)
 
 
+def _run_structured_action_check(args: argparse.Namespace, scripts_dir: Path, skill_dir: Path) -> None:
+    policy_file = Path(os.environ.get("AUTONOMY_YAML", str(skill_dir / "autonomy.yaml")))
+    policy = AutonomyPolicy(policy_file) if policy_file.exists() else AutonomyPolicy(Path("/dev/null"))
+    rules_path = Path(os.environ.get("RULES_PATH", str(scripts_dir / "primitive_rules.json")))
+    primitives_dir = Path(os.environ.get("AGENT_GATE_PRIMITIVES_DIR", str(scripts_dir)))
+    inventory_path = Path(os.environ.get("HOSTS_YAML", str(skill_dir / "hosts.yaml")))
+    inventory = Inventory(inventory_path)
+    hosts = inventory.resolve_hosts(args.host)
+    action_args = list(hosts[:1]) + list(args.arg)
+    environment = "prod" if any(inventory.is_production(host) for host in hosts) else "dev"
+    assessment = preflight_action(
+        ActionSpec(args.primitive, action_args, hosts, environment, args.phase),
+        policy=policy,
+        semantic_guard=SemanticGuard(rules_path, test_mode=args.test_mode),
+        path_guard=PathPolicyGuard(),
+        confirmations=ConfirmationSet(
+            risk=args.confirm_risk,
+            path=args.confirm_path,
+            fleet=args.confirm_fleet,
+            production=args.confirm_prod,
+            destructive=args.confirm_destructive,
+            raw_exec=args.allow_raw_exec,
+        ),
+        autonomy_level=os.environ.get("AUTONOMY_LEVEL", policy.env_max_level(environment)),
+        primitives_dir=primitives_dir,
+        inventory=inventory,
+        test_mode=args.test_mode,
+    )
+    result = {
+        "success": assessment.allowed,
+        "primitive": assessment.primitive,
+        "args": assessment.args,
+        "phase": assessment.phase,
+        "risk": assessment.risk,
+        "mutating": assessment.mutating,
+        "prod_target": assessment.prod_target,
+        "host_count": assessment.host_count,
+        "reasons": assessment.reasons,
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    sys.exit(0 if assessment.allowed else 1)
+
+
 def main() -> None:
     args = parse_args(sys.argv[1:])
 
@@ -727,6 +963,9 @@ def main() -> None:
     hosts_yaml = Path(os.environ.get("HOSTS_YAML", str(skill_dir / "hosts.yaml")))
     rules_path = Path(os.environ.get("RULES_PATH", str(scripts_dir / "primitive_rules.json")))
 
+    if args.command == "check-action":
+        _run_structured_action_check(args, scripts_dir, skill_dir)
+        return
     if args.policy_check is not None:
         _run_policy_check(args, scripts_dir, skill_dir)
         return
@@ -772,89 +1011,90 @@ def main() -> None:
                          f"Autonomy policy failed validation: {result.stderr.strip() or result.stdout.strip()}")
 
     effective_env_max_level = policy.env_max_level(decision.environment)
+    inventory = Inventory(hosts_yaml)
+    semantic_guard = SemanticGuard(rules_path, test_mode=args.test_mode)
+    path_guard = PathPolicyGuard()
+    confirmations = ConfirmationSet(
+        risk=args.confirm_risk, path=args.confirm_path, fleet=args.confirm_fleet,
+        production=args.confirm_prod, destructive=args.confirm_destructive,
+        raw_exec=args.allow_raw_exec,
+    )
 
-    # ---- Gate checks ----
+    def assess_or_block(action: ActionSpec) -> ActionAssessment:
+        assessment = preflight_action(
+            action, policy=policy, semantic_guard=semantic_guard,
+            path_guard=path_guard, confirmations=confirmations,
+            autonomy_level=decision.autonomy_level, primitives_dir=primitives_dir,
+            inventory=inventory, test_mode=args.test_mode,
+        )
+        if not assessment.allowed:
+            reason = assessment.reasons[0]
+            error = "semantic_blocked" if reason.startswith("semantic_blocked") else {
+                "unknown_primitive": "unknown_primitive",
+                "path_confirmation_required": "path_blocked",
+                "production_confirmation_required": "autonomy_blocked",
+                "fleet_confirmation_required": "autonomy_blocked",
+                "risk_confirmation_required": "autonomy_blocked",
+                "autonomy_blocked": "autonomy_blocked",
+                "verification_must_be_read_only": "verification_blocked",
+                "verification_exec_forbidden": "verification_blocked",
+                "raw_exec_blocked": "raw_exec_blocked",
+                "phase_not_allowed": "phase_blocked",
+                "destructive_confirmation_required": "confirmation_required",
+            }.get(reason.split(":", 1)[0], "action_blocked")
+            if reason == "fleet_confirmation_required":
+                message = f"Host count {assessment.host_count} exceeds max_hosts {policy.max_hosts}. Use --confirm-fleet."
+            elif reason == "production_confirmation_required":
+                message = "Production write target requires --confirm-prod."
+            elif reason == "path_confirmation_required":
+                message = f"Command targets sensitive path: {assessment.path_violation}. Use --confirm-path."
+            elif reason == "risk_confirmation_required":
+                message = "Action risk exceeds the autonomy policy. Use --confirm-risk."
+            else:
+                message = "; ".join(assessment.reasons)
+            die_json(error, message)
+        return assessment
 
-    if decision.autonomy_level == "L5":
-        die_json("autonomy_forbidden", "L5 actions are forbidden and cannot be executed")
-    if decision.risk == "forbidden":
-        die_json("autonomy_forbidden", "Forbidden-risk actions cannot be executed by agent_gate")
+    if decision.autonomy_level == "L5" or decision.risk == "forbidden":
+        die_json("autonomy_forbidden", "L5 or forbidden-risk actions cannot be executed")
     if args.execute and decision.autonomy_level == "L0":
         die_json("autonomy_blocked", "L0 is advisory-only and does not allow remote execution")
-
-    if decision.level_num_val > level_num(effective_env_max_level) and not args.confirm_risk:
-        die_json("autonomy_blocked",
-                 f"Decision autonomy level {decision.autonomy_level} exceeds policy max "
-                 f"{effective_env_max_level} for env={decision.environment}. "
-                 f"Use --confirm-risk to override.")
-
-    if decision.risk_num_val > decision.risk_limit and not args.confirm_risk:
-        die_json("autonomy_blocked",
-                 f"Risk {decision.risk} exceeds allowed risk for {decision.autonomy_level}. "
-                 f"Use --confirm-risk to override.")
-
-    # Risk mismatch guard
-    semantic_guard = SemanticGuard(rules_path, test_mode=args.test_mode)
-    computed_risk = semantic_guard.compute_risk(decision.primitive, decision.args)
-    if computed_risk != "unknown" and computed_risk != decision.risk:
-        risk_diff = risk_num(computed_risk) - decision.risk_num_val
-        if risk_diff > 0 and not args.confirm_risk:
-            die_json("risk_mismatch",
-                     f"Decision declares risk={decision.risk} but primitive "
-                     f"computed risk is {computed_risk} for "
-                     f"{primitive_action_key(decision.primitive, decision.args)}. "
-                     f"Use --confirm-risk to override.")
-
     if decision.requires_confirmation and not args.confirm_risk:
-        die_json("confirmation_required",
-                 "Decision guardrails require explicit confirmation. "
-                 "Use --confirm-risk to override.")
+        die_json("confirmation_required", "Decision guardrails require --confirm-risk")
+
+    primary_assessment = assess_or_block(ActionSpec(
+        decision.primitive, decision.args, decision.hosts,
+        decision.environment, "execute",
+    ))
+    computed_risk = primary_assessment.risk
+    if (computed_risk != "unknown" and risk_num(computed_risk) > decision.risk_num_val
+            and not args.confirm_risk):
+        die_json("risk_mismatch",
+                 f"Decision declares risk={decision.risk} but primitive computed risk is {computed_risk}.")
+
+    # Verify and rollback are checked before any side effect. This is deliberately
+    # done even for dry-run so an unsafe recovery path cannot hide behind execution.
+    for phase, actions in (("verify", decision.verification_actions),
+                           ("rollback", decision.rollback_actions),
+                           ("verify", decision.rollback_verification_actions)):
+        for index, item in enumerate(actions):
+            phase_assessment = assess_or_block(ActionSpec(
+                item.get("primitive", ""), item.get("args", []), decision.hosts,
+                decision.environment, phase,
+            ))
+            if phase == "rollback" and risk_num(phase_assessment.risk) > risk_num(primary_assessment.risk):
+                if decision.autonomy_level != "L4" or not args.confirm_risk:
+                    die_json("rollback_risk_exceeds_primary",
+                             "Rollback risk must not exceed primary action risk unless explicitly approved at L4")
+
+    if decision.guardrails.get("rollback_available") is True and not decision.rollback_actions:
+        die_json("rollback_invalid", "rollback_available=true requires rollback_actions")
+    if decision.guardrails.get("rollback_available") is False and decision.rollback_actions:
+        die_json("rollback_invalid", "rollback_available=false cannot include rollback_actions")
+    if decision.rollback_actions and not decision.rollback_verification_declared:
+        die_json("rollback_invalid", "rollback_actions require rollback_verification_actions")
 
     effective_max_hosts = decision.guardrail_max_hosts or policy.max_hosts
-    if decision.host_count > effective_max_hosts and not args.confirm_fleet:
-        die_json("autonomy_blocked",
-                 f"Host count {decision.host_count} exceeds max_hosts {effective_max_hosts}. "
-                 f"Use --confirm-fleet to override.")
-
-    if decision.environment in ("prod", "production"):
-        if decision.level_num_val > 1 and not args.confirm_prod:
-            die_json("prod_guard",
-                     "Production targets default to L1 observe-only unless explicitly confirmed. "
-                     "Use --confirm-prod to override.")
-
-    # Semantic guard must run before primitive name validation so unknown
-    # primitives get 'semantic_blocked' (fail-closed), not 'unknown_primitive'.
-    sg_valid, sg_error = semantic_guard.validate(
-        decision.primitive, decision.args, decision.autonomy_level,
-    )
-    if not sg_valid and not args.confirm_risk and not args.test_mode:
-        die_json("semantic_blocked", sg_error)
-
-    validate_primitive_name(decision.primitive, primitives_dir)
-
-    if decision.primitive == "exec.sh" and not args.allow_raw_exec and not args.confirm_risk:
-        die_json("raw_exec_blocked",
-                 "exec.sh is blocked by agent_gate unless --allow-raw-exec or --confirm-risk.")
-
-    # Path policy guard
-    path_guard = PathPolicyGuard()
-    cmd_str = f"{decision.primitive} {' '.join(decision.args)}"
-    path_violation = path_guard.check(cmd_str)
-    if path_violation and not args.confirm_path:
-        die_json("path_blocked",
-                 f"Command targets sensitive path: {path_violation}. "
-                 f"Use --confirm-path to override.")
-
-    configured_allowed = policy.allows_unattended(
-        decision.autonomy_level, decision.primitive, decision.args,
-    )
-    if (not is_allowed_without_confirmation(decision.autonomy_level, decision.primitive, decision.args)
-            or not configured_allowed):
-        if not args.confirm_risk and not args.test_mode:
-            key = primitive_action_key(decision.primitive, decision.args)
-            die_json("autonomy_blocked",
-                     f"Primitive/action {key} is not allowed unattended at {decision.autonomy_level}. "
-                     f"Use --confirm-risk to override.")
 
     if policy.require_verification and args.execute and not args.test_mode:
         if decision.level_num_val >= 2 or decision.risk != "low":
@@ -917,9 +1157,26 @@ def main() -> None:
         return
 
     # ---- Execute ----
+    lock_handle = None
+    if decision.requires_lock:
+        lock_root = Path(os.environ.get("AGENT_GATE_LOCK_DIR", "/tmp/agent-gate-locks"))
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_resource = ":".join(decision.args[1:]) or decision.primitive
+        lock_name = hashlib.sha256(
+            f"{','.join(decision.hosts)}:{decision.primitive}:{lock_resource}".encode()
+        ).hexdigest()
+        lock_handle = open(lock_root / f"{lock_name}.lock", "a+")
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_handle.close()
+            die_json("lock_acquire_failed", "Action resource lock is already held")
+        atexit.register(lambda: (fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN), lock_handle.close()))
+
     start_ms = int(time.time() * 1000)
     action_rc, _, _ = run_primitive(
         "execute", decision.primitive, decision.args, primitives_dir, capture=False,
+        timeout_sec=decision.timeout_sec, output_limit_bytes=decision.output_limit_bytes,
     )
     duration_ms = int(time.time() * 1000) - start_ms
     write_audit_event(_ESCALATION_RUN_ID, "agent_gate", f"execute:{decision.primitive}",
@@ -966,6 +1223,8 @@ def main() -> None:
 
         v_rc, _, _ = run_primitive(
             f"verify[{i}]", v_primitive, v_args, primitives_dir, capture=True,
+            timeout_sec=decision.verification_timeout_sec,
+            output_limit_bytes=decision.output_limit_bytes,
         )
         write_audit_event(_ESCALATION_RUN_ID, "agent_gate", f"verify:{v_primitive}",
                           v_rc == 0, v_rc, 0,
@@ -977,6 +1236,7 @@ def main() -> None:
             break
 
     rollback_attempted = False
+    rollback_failed = False
     if verify_outcome != "healthy":
         should_rollback = (
             verify_outcome == "failed"
@@ -995,13 +1255,43 @@ def main() -> None:
                              f"Rollback action {i} has invalid primitive: {rb_primitive}")
                 rb_rc, _, _ = run_primitive(
                     f"rollback[{i}]", rb_primitive, rb_args, primitives_dir, capture=True,
+                    timeout_sec=decision.rollback_timeout_sec,
+                    output_limit_bytes=decision.output_limit_bytes,
                 )
                 write_audit_event(_ESCALATION_RUN_ID, "agent_gate", f"rollback:{rb_primitive}",
                                   rb_rc == 0, rb_rc, 0,
-                                  f"{rb_primitive} {' '.join(shlex.quote(a) for a in rb_args)}",
-                                  audit_dir)
+                          f"{rb_primitive} {' '.join(shlex.quote(a) for a in rb_args)}",
+                          audit_dir)
+                if rb_rc != 0:
+                    rollback_failed = True
+                    break
 
-        error_code = "verification_failed" if verify_outcome == "failed" else "verification_error"
+            if not rollback_failed:
+                for i, rv_action in enumerate(decision.rollback_verification_actions):
+                    rv_primitive = rv_action.get("primitive", "")
+                    rv_args = rv_action.get("args", [])
+                    rv_rc, _, _ = run_primitive(
+                        f"rollback-verify[{i}]", rv_primitive, rv_args,
+                        primitives_dir, capture=True,
+                        timeout_sec=decision.verification_timeout_sec,
+                        output_limit_bytes=decision.output_limit_bytes,
+                    )
+                    write_audit_event(
+                        _ESCALATION_RUN_ID, "agent_gate", f"rollback-verify:{rv_primitive}",
+                        rv_rc == 0, rv_rc, 0,
+                        f"{rv_primitive} {' '.join(shlex.quote(a) for a in rv_args)}",
+                        audit_dir,
+                    )
+                    if _classify_verify_rc(rv_primitive, rv_rc) != "healthy":
+                        rollback_failed = True
+                        break
+
+        if rollback_attempted and rollback_failed:
+            error_code = "rollback_failed"
+        elif rollback_attempted:
+            error_code = "verification_failed_rolled_back"
+        else:
+            error_code = "verification_failed" if verify_outcome == "failed" else "verification_error"
         print(json.dumps({
             "success": False,
             "run_id": _ESCALATION_RUN_ID,

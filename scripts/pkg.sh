@@ -19,13 +19,25 @@ source "$SCRIPTS_DIR/common.sh"
 
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 CONFIRM_FLAG=""
-if [[ "${*: -1}" == "--confirm" ]]; then CONFIRM_FLAG="--confirm"; fi
+GATE_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+      --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes ;;
+      --confirm-path) SSH_SKILL_CONFIRM_PATH=yes ;;
+      --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes ;;
+      --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes ;;
+      --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes ;;
+      --confirm) die_json "invalid_confirmation" "禁止使用 legacy --confirm" "$HOST_NAME" ;;
+      *) GATE_ARGS+=("$arg") ;;
+    esac
+done
+gate_action pkg.sh direct "$HOST_NAME" "$ACTION" "${GATE_ARGS[@]}"
 q() { printf '%q' "$1"; }
 
 run_pkg_cmd() {
     local cmd="$1" op="$2"
     set +e
-    RESULT=$(SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/exec.sh" "$HOST_NAME" "$cmd" "$CONFIRM_FLAG")
+    RESULT=$(SSH_SKILL_STRUCTURED_GATE=yes SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/exec.sh" "$HOST_NAME" "$cmd" "$CONFIRM_FLAG")
     RC=$?
     set -e
     SUCCESS=$([ "$RC" -eq 0 ] && echo true || echo false)
@@ -61,20 +73,17 @@ case "$ACTION" in
         run_pkg_cmd "pm=\$($DETECT_CMD); case \$pm in apt) dpkg -s $N 2>/dev/null | head -30 ;; dnf|yum) rpm -q $N ;; apk) apk info -e $N ;; pacman) pacman -Qi $N 2>/dev/null | head -30 ;; *) echo unsupported_pkg_manager=\$pm; exit 2 ;; esac" "installed"
         ;;
     update-cache)
-        [[ "$CONFIRM_FLAG" == "--confirm" || "${SSH_SKILL_CONFIRMED:-}" == "yes" ]] || die_json "confirm_required" "update-cache 会修改包缓存，需要 --confirm 或 SSH_SKILL_CONFIRMED=yes" "$HOST_NAME"
         run_pkg_cmd "pm=\$($DETECT_CMD); case \$pm in apt) sudo apt-get update ;; dnf|yum) sudo \$pm makecache ;; apk) sudo apk update ;; pacman) sudo pacman -Sy --noconfirm ;; *) echo unsupported_pkg_manager=\$pm; exit 2 ;; esac" "update-cache"
         ;;
     install)
         NAME="${1:?install 缺少包名}"
         [[ "$NAME" =~ ^[A-Za-z0-9_.+:-]+$ ]] || die_json "invalid_package" "包名包含非法字符: $NAME" "$HOST_NAME"
-        [[ "$CONFIRM_FLAG" == "--confirm" || "${SSH_SKILL_CONFIRMED:-}" == "yes" ]] || die_json "confirm_required" "install 会修改系统，需要 --confirm 或 SSH_SKILL_CONFIRMED=yes" "$HOST_NAME"
         N="$(q "$NAME")"
         run_pkg_cmd "pm=\$($DETECT_CMD); case \$pm in apt) sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $N ;; dnf|yum) sudo \$pm install -y $N ;; apk) sudo apk add $N ;; pacman) sudo pacman -S --noconfirm $N ;; *) echo unsupported_pkg_manager=\$pm; exit 2 ;; esac" "install"
         ;;
     remove)
         NAME="${1:?remove 缺少包名}"
         [[ "$NAME" =~ ^[A-Za-z0-9_.+:-]+$ ]] || die_json "invalid_package" "包名包含非法字符: $NAME" "$HOST_NAME"
-        [[ "$CONFIRM_FLAG" == "--confirm" || "${SSH_SKILL_CONFIRMED:-}" == "yes" ]] || die_json "confirm_required" "remove 会修改系统，需要 --confirm 或 SSH_SKILL_CONFIRMED=yes" "$HOST_NAME"
         N="$(q "$NAME")"
         run_pkg_cmd "pm=\$($DETECT_CMD); case \$pm in apt) sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y $N && sudo DEBIAN_FRONTEND=noninteractive apt-get autoremove -y ;; dnf|yum) sudo \$pm remove -y $N || sudo rpm -e --noscripts $N; sudo \$pm autoremove -y ;; apk) sudo apk del $N ;; pacman) sudo pacman -Rns --noconfirm $N ;; *) echo unsupported_pkg_manager=\$pm; exit 2 ;; esac" "remove"
         ;;

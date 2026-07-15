@@ -30,6 +30,18 @@
     },
     "file.sh": {
       "description": "File operations",
+      "commands": {
+        "exists": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
+        "stat": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
+        "list": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
+        "head": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
+        "tail": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
+        "grep": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
+        "checksum": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
+        "backup": {"risk": "low", "mutating": true, "allowed_phases": ["execute", "rollback", "direct"]},
+        "mkdir": {"risk": "medium", "mutating": true, "allowed_phases": ["execute", "rollback", "direct"]},
+        "remove": {"risk": "high", "mutating": true, "destructive": true, "allowed_phases": ["execute", "rollback", "direct"]}
+      },
       "arg0": "host",
       "arg1": "command",
       "allowed_commands": ["exists", "stat", "list", "head", "tail", "grep", "checksum", "backup", "mkdir", "remove"],
@@ -73,6 +85,14 @@
     },
     "pkg.sh": {
       "description": "Package management",
+      "commands": {
+        "detect": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
+        "search": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
+        "installed": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
+        "update-cache": {"risk": "low", "mutating": true, "allowed_phases": ["execute", "direct"]},
+        "install": {"risk": "high", "mutating": true, "allowed_phases": ["execute", "rollback", "direct"]},
+        "remove": {"risk": "high", "mutating": true, "allowed_phases": ["execute", "rollback", "direct"]}
+      },
       "arg0": "host",
       "arg1": "command",
       "allowed_commands": ["detect", "search", "installed", "update-cache", "install", "remove"],
@@ -89,6 +109,14 @@
     },
     "service.sh": {
       "description": "Service management",
+      "commands": {
+        "status": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
+        "logs": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
+        "restart": {"risk": "medium", "mutating": true, "allowed_phases": ["execute", "rollback", "direct"]},
+        "reload": {"risk": "medium", "mutating": true, "allowed_phases": ["execute", "rollback", "direct"]},
+        "stop": {"risk": "high", "mutating": true, "destructive": true, "allowed_phases": ["execute", "rollback", "direct"]},
+        "disable": {"risk": "high", "mutating": true, "destructive": true, "allowed_phases": ["execute", "rollback", "direct"]}
+      },
       "arg0": "host",
       "arg1": "command",
       "allowed_commands": ["status", "logs", "restart", "reload", "stop", "disable"],

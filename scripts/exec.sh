@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # OpenClaw SSH Skill - 通过 ControlMaster socket 执行远程命令
-# 用法: bash exec.sh <host|host1,host2,...> "command" [--confirm] [--sudo]
+# 用法: bash exec.sh <host|host1,host2,...> "command" [--confirm-risk|--confirm-prod|--confirm-fleet] [--sudo]
 set -euo pipefail
 
-HOST_NAMES="${1:?用法: exec.sh <host|host1,host2,...> <command> [--confirm] [--sudo]}"
+HOST_NAMES="${1:?用法: exec.sh <host|host1,host2,...> <command> [confirmation] [--sudo]}"
 REMOTE_CMD="${2:?缺少命令参数}"
 CONFIRM_FLAG=""
 SUDO_RETRY=0
@@ -11,8 +11,11 @@ SUDO_RETRY=0
 shift 2
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --confirm-risk|--confirm-path|--confirm-fleet|--confirm-prod|--confirm-destructive)
+            CONFIRM_FLAG="$1"; shift ;;
         --confirm)
-            CONFIRM_FLAG="--confirm"; shift ;;
+            echo '{"success":false,"error":"legacy_confirmation_rejected"}' >&2
+            exit 2 ;;
         --sudo)
             SUDO_RETRY=1; shift ;;
         "")
@@ -28,7 +31,9 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPTS_DIR/common.sh"
 
 HOST_COUNT=$(host_count_from_csv "$HOST_NAMES")
-policy_check_command "$REMOTE_CMD" "$HOST_COUNT" "$CONFIRM_FLAG" "$HOST_NAMES"
+if [[ "${SSH_SKILL_STRUCTURED_GATE:-}" != yes ]]; then
+    policy_check_command "$REMOTE_CMD" "$HOST_COUNT" "$CONFIRM_FLAG" "$HOST_NAMES"
+fi
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 
 # 多主机兼容模式：仍支持逗号分隔，但输出聚合 JSON。
@@ -127,7 +132,9 @@ if [[ $EXIT_CODE -ne 0 ]] && echo "$STDERR_CONTENT" | grep -qi "Permission denie
     ERROR_FIELD="permission_denied"
     if [[ "$SUDO_RETRY" -eq 1 || "${SSH_SKILL_ALLOW_SUDO_RETRY:-}" == "yes" ]]; then
         SUDO_CMD="sudo bash -lc $(printf '%q' "$FULL_CMD")"
-        policy_check_command "$SUDO_CMD" "$HOST_COUNT" "$CONFIRM_FLAG" "$HOST_NAME"
+        if [[ "${SSH_SKILL_STRUCTURED_GATE:-}" != yes ]]; then
+            policy_check_command "$SUDO_CMD" "$HOST_COUNT" "$CONFIRM_FLAG" "$HOST_NAME"
+        fi
         echo "[ssh-skill] 检测到权限不足，按显式授权尝试 sudo 重新执行..." >&2
         set +e
         run_ssh "$SUDO_CMD"

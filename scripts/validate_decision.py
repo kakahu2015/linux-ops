@@ -33,6 +33,7 @@ TOP_LEVEL_ALLOWED = set(REQUIRED) | {
     "verification_actions",
     "rollback",
     "rollback_actions",
+    "rollback_verification_actions",
     "escalation_reason",
 }
 
@@ -47,6 +48,9 @@ GUARDRAIL_ALLOWED = {
     "policy_risk",
     "max_hosts",
     "timeout_sec",
+    "verification_timeout_sec",
+    "rollback_timeout_sec",
+    "output_limit_bytes",
     "output_limit",
 }
 TARGET_ALLOWED = {"hosts", "selector", "environment"}
@@ -200,7 +204,7 @@ def validate_decision(decision: Any, *, strict_opsec: bool = True) -> list[str]:
                 fail(errors, f"$.guardrails.{key}", "must be a boolean")
         if "policy_risk" in guardrails and guardrails["policy_risk"] not in RISKS:
             fail(errors, "$.guardrails.policy_risk", "must be one of low, medium, high, forbidden")
-        for key in ("max_hosts", "timeout_sec"):
+        for key in ("max_hosts", "timeout_sec", "verification_timeout_sec", "rollback_timeout_sec", "output_limit_bytes"):
             if key in guardrails and (not isinstance(guardrails[key], int) or guardrails[key] < 0):
                 fail(errors, f"$.guardrails.{key}", "must be a non-negative integer")
         if "max_hosts" in guardrails and guardrails["max_hosts"] < 1:
@@ -208,7 +212,7 @@ def validate_decision(decision: Any, *, strict_opsec: bool = True) -> list[str]:
         if "output_limit" in guardrails and not isinstance(guardrails["output_limit"], str):
             fail(errors, "$.guardrails.output_limit", "must be a string")
 
-    for group_name in ("verification_actions", "rollback_actions"):
+    for group_name in ("verification_actions", "rollback_actions", "rollback_verification_actions"):
         group = decision.get(group_name, [])
         if group is None:
             group = []

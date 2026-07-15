@@ -13,6 +13,16 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
 
+case "$CONFIRM_FLAG" in
+  --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes ;;
+  --confirm-path) SSH_SKILL_CONFIRM_PATH=yes ;;
+  --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes ;;
+  --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes ;;
+  --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes ;;
+  "") ;;
+  *) die_json "invalid_confirmation" "只允许使用独立确认参数" "$HOST_NAMES" ;;
+esac
+
 # Validate before use: SERVICE_NAME is interpolated directly into CMD below.
 # This regex is the only barrier preventing shell injection through $SERVICE_NAME.
 [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+$ ]] || die_json "invalid_service" "服务名包含非法字符: $SERVICE_NAME"
@@ -44,15 +54,14 @@ case "$ACTION" in
     ;;
 esac
 
-HOST_COUNT=$(host_count_from_csv "$HOST_NAMES")
-policy_check_command "$CMD" "$HOST_COUNT" "$CONFIRM_FLAG" "$HOST_NAMES"
+gate_action service.sh direct "$HOST_NAMES" "$ACTION" "$SERVICE_NAME"
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 
 EXEC_FLAGS=()
 [[ -n "$CONFIRM_FLAG" ]] && EXEC_FLAGS+=("$CONFIRM_FLAG")
 
 set +e
-RESULT=$(SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/exec.sh" "$HOST_NAMES" "$CMD" "${EXEC_FLAGS[@]}")
+RESULT=$(SSH_SKILL_STRUCTURED_GATE=yes SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/exec.sh" "$HOST_NAMES" "$CMD" "${EXEC_FLAGS[@]}")
 RC=$?
 set -e
 

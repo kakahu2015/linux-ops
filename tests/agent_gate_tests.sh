@@ -124,6 +124,9 @@ write_mock_decision() {
   "rollback_actions": [
     {"primitive": "$rollback", "args": ["rollback"], "expected_effect": "mock rollback result"}
   ],
+  "rollback_verification_actions": [
+    {"primitive": "generic_success.sh", "args": ["verify"], "expected_effect": "mock rollback restored state"}
+  ],
   "stop_condition": "mock execution completes or fails as expected",
   "confidence": "high"
 }
@@ -272,9 +275,10 @@ expect_failure_contains \
   "autonomy_blocked" \
   env AGENT_GATE_PRIMITIVES_DIR="$ROOT/scripts" bash "$ROOT/scripts/agent_gate.sh" --decision "$PROD_L3_NO_CONFIRM_PROD" --policy "$ROOT/autonomy.example.yaml" --dry-run --confirm-fleet
 
-# legacy --confirm still works (expands to all flags)
-expect_success \
-  "legacy --confirm expands to all confirm flags" \
+# legacy --confirm is intentionally rejected; confirmations cannot be widened.
+expect_failure_contains \
+  "legacy --confirm is rejected" \
+  "ambiguous option" \
   env AGENT_GATE_PRIMITIVES_DIR="$ROOT/scripts" bash "$ROOT/scripts/agent_gate.sh" --decision "$PROD_L3_WITH_CONFIRM_PROD" --policy "$ROOT/autonomy.example.yaml" --dry-run --confirm
 
 # ---- v2.0 tests ----
@@ -374,12 +378,11 @@ PY
 
 risk_from_policy() {
     local cmd_string="$1"
-    # --confirm expands to all flags so the command always reaches the success path,
-    # giving us the matched risk level without being blocked.
+    # Independently confirm each policy dimension so no legacy flag can widen scope.
     python3 "$ROOT/scripts/agent_gate.py" \
         --policy-check "$cmd_string" \
         --host-count 1 \
-        --confirm \
+        --confirm-risk --confirm-fleet --confirm-prod --confirm-path \
         2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('risk','low'))" 2>/dev/null || echo "low"
 }
 

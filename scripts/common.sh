@@ -20,13 +20,15 @@ json_escape() {
 }
 
 # Redaction layers — delegated to Python for reliable regex handling
-redact_secret()     { python3 "$SCRIPTS_DIR/redact.py" --secret 2>/dev/null || python3 -c "import sys; sys.stdout.write(__import__('sys').stdin.read())"; }
-redact_infra()      { python3 "$SCRIPTS_DIR/redact.py" --infra  2>/dev/null || python3 -c "import sys; sys.stdout.write(__import__('sys').stdin.read())"; }
-redact()            { python3 "$SCRIPTS_DIR/redact.py"          2>/dev/null || python3 -c "import sys; sys.stdout.write(__import__('sys').stdin.read())"; }
+redact_secret()     { python3 "$SCRIPTS_DIR/redact.py" --secret 2>/dev/null || printf '[REDACTION_FAILED]'; }
+redact_infra()      { python3 "$SCRIPTS_DIR/redact.py" --infra  2>/dev/null || printf '[REDACTION_FAILED]'; }
+redact()            { python3 "$SCRIPTS_DIR/redact.py"          2>/dev/null || printf '[REDACTION_FAILED]'; }
 
 redact_string() {
     local text="${1-}" item label value
-    text="$(printf '%s' "$text" | python3 "$SCRIPTS_DIR/redact.py" 2>/dev/null || printf '%s' "$text")"
+    if ! text="$(printf '%s' "$text" | python3 "$SCRIPTS_DIR/redact.py" 2>/dev/null)"; then
+        text='[REDACTION_FAILED]'
+    fi
     for item in "SSH_HOST:REDACTED_HOST" "SSH_USER:REDACTED_USER" "KEY_PATH:REDACTED_KEY_PATH" "SECRETS_ENV:REDACTED_SECRETS_PATH" "REAL_HOST:REDACTED_HOST"; do
         label="${item%%:*}"; value="${!label-}"
         [[ -n "$value" ]] && text="${text//"$value"/[$(printf '%s' "${item#*:}")]}"
@@ -121,12 +123,12 @@ policy_check_command() {
     local confirm_fleet_flag="" confirm_prod_flag=""
     local confirm_path_flag=""
     local confirm_risk_flag=""
-    local confirm_single_flag=""
-    [[ "$confirm" == "--confirm" || "$confirm" == "--confirm-fleet" || "${SSH_SKILL_CONFIRMED:-}" == yes ]] && confirm_fleet_flag="--confirm-fleet"
-    [[ "$confirm" == "--confirm" || "$confirm" == "--confirm-prod"  || "${SSH_SKILL_CONFIRMED:-}" == yes ]] && confirm_prod_flag="--confirm-prod"
+    [[ "$confirm" == "--confirm-fleet" || "${SSH_SKILL_CONFIRM_FLEET:-}" == yes ]] && confirm_fleet_flag="--confirm-fleet"
+    [[ "$confirm" == "--confirm-prod"  || "${SSH_SKILL_CONFIRM_PROD:-}" == yes ]] && confirm_prod_flag="--confirm-prod"
     [[ "${SSH_SKILL_CONFIRM_PATH:-}" == yes ]] && confirm_path_flag="--confirm-path"
     [[ "${SSH_SKILL_CONFIRM_RISK:-}" == yes ]] && confirm_risk_flag="--confirm-risk"
-    [[ "${SSH_SKILL_CONFIRM_PATH:-}" == yes ]] && confirm_single_flag="--confirm"
+    [[ "$confirm" == "--confirm-path" ]] && confirm_path_flag="--confirm-path"
+    [[ "$confirm" == "--confirm-risk" ]] && confirm_risk_flag="--confirm-risk"
 
     local result
     result=$(python3 "$SCRIPTS_DIR/agent_gate.py" \
@@ -137,13 +139,41 @@ policy_check_command() {
         ${confirm_prod_flag:+"$confirm_prod_flag"} \
         ${confirm_path_flag:+"$confirm_path_flag"} \
         ${confirm_risk_flag:+"$confirm_risk_flag"} \
-        ${confirm_single_flag:+"$confirm_single_flag"} \
         2>/dev/null)
     local rc=$?
     if [[ $rc -ne 0 ]]; then
         local msg
         msg=$(printf '%s' "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('message','policy check failed'))" 2>/dev/null || echo "policy check failed")
         die_json "policy_blocked" "$(redact_string "$msg")"
+    fi
+}
+
+# Structured primitive gate. The primitive name/action/arguments remain intact
+# all the way to Python; raw command policy is reserved for exec.sh.
+gate_action() {
+    local primitive="$1" phase="${2:-direct}" host_csv="$3" action_arg
+    shift 3
+    local cmd=(python3 "$SCRIPTS_DIR/agent_gate.py" check-action
+        --primitive "$primitive" --phase "$phase")
+    IFS=',' read -ra _gate_hosts <<< "$host_csv"
+    local h
+    for h in "${_gate_hosts[@]}"; do
+        [[ -n "${h// /}" ]] && cmd+=(--host "$(echo "$h" | xargs)")
+    done
+    for action_arg in "$@"; do cmd+=(--arg "$action_arg"); done
+    [[ "${SSH_SKILL_CONFIRM_RISK:-}" == yes ]] && cmd+=(--confirm-risk)
+    [[ "${SSH_SKILL_CONFIRM_PATH:-}" == yes ]] && cmd+=(--confirm-path)
+    [[ "${SSH_SKILL_CONFIRM_FLEET:-}" == yes ]] && cmd+=(--confirm-fleet)
+    [[ "${SSH_SKILL_CONFIRM_PROD:-}" == yes ]] && cmd+=(--confirm-prod)
+    [[ "${SSH_SKILL_CONFIRM_DESTRUCTIVE:-}" == yes ]] && cmd+=(--confirm-destructive)
+    local result rc
+    set +e
+    result="$("${cmd[@]}" 2>/dev/null)"
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]]; then
+        printf '%s\n' "$result"
+        return "$rc"
     fi
 }
 
