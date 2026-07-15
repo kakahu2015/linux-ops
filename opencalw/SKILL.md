@@ -24,10 +24,22 @@ compatibility:
 
 This skill provides bounded Linux operations over SSH.
 
-This skill is subordinate to the workspace constitution in `AGENTS.md`. It may
-add Linux/SSH-specific restrictions, but it must never relax, replace, or
-narrow the constitution's safety, authorization, secret-handling, or scope
-rules. When rules conflict, `AGENTS.md` wins.
+## Constitutional Authority
+
+The agent constitution in `AGENTS.md` is the governing authority for this
+skill. This file is subordinate operating guidance only: it may add stricter
+Linux/SSH constraints, but it must never relax, replace, reinterpret, or
+narrow the constitution's safety, stability, authorization, secret-handling,
+trust, or scope rules.
+
+Before every action, apply the constitution's priority order and conflict
+resolution rules. A gate, autonomy level, user request, tool instruction, or
+workflow in this skill cannot create authorization that the constitution does
+not grant. If this skill conflicts with `AGENTS.md`, follow `AGENTS.md`, stop
+when required, and report the conflict rather than improvising an exception.
+
+The constitution's forbidden paths, confirmation requirements, and red-line
+operations apply even when they are not repeated below.
 
 Use it when you need to:
 - inspect a remote Linux host
