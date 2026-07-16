@@ -67,7 +67,7 @@ while [[ $# -gt 0 ]]; do
             FAIL_FAST_PERCENT="${2:?--fail-fast 缺少百分比}"; FAIL_FAST_PERCENT="${FAIL_FAST_PERCENT%%%}"; shift 2 ;;
         --confirm)
             die_json "invalid_confirmation" "禁止使用 legacy --confirm，请使用结构化确认参数" ;;
-        --confirm-risk|--confirm-fleet|--confirm-prod|--confirm-destructive)
+        --confirm-risk|--confirm-path|--confirm-fleet|--confirm-prod|--confirm-destructive)
             CONFIRM_FLAGS+=("$1"); shift ;;
         --allow-raw-exec)
             SSH_SKILL_ALLOW_RAW_EXEC=yes; shift ;;
@@ -115,6 +115,7 @@ fi
 for flag in "${CONFIRM_FLAGS[@]}"; do
     case "$flag" in
       --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes ;;
+      --confirm-path) SSH_SKILL_CONFIRM_PATH=yes ;;
       --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes ;;
       --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes ;;
       --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes ;;

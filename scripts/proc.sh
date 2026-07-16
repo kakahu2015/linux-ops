@@ -86,7 +86,6 @@ case "$ACTION" in
     kill)
         PID="${1:?kill 缺少 pid}"
         [[ "$PID" =~ ^[0-9]+$ ]] || die_json "invalid_pid" "pid 必须是整数" "$HOST_NAME"
-        [[ "${SSH_SKILL_CONFIRM_DESTRUCTIVE:-}" == yes ]] || die_json "confirm_required" "kill 需要 --confirm-destructive" "$HOST_NAME"
         run_proc_cmd "kill $PID && echo killed=$PID" "kill"
         ;;
     *)
