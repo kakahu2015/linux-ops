@@ -124,6 +124,14 @@ if [[ -n "$REMOTE_CMD" ]]; then
     policy_check_command "$REMOTE_CMD" "$TOTAL" "" "$HOST_CSV"
     gate_action exec.sh direct "$HOST_CSV" "$REMOTE_CMD"
 fi
+if [[ -n "$PRIMITIVE" ]]; then
+    gate_cmd=(python3 "$SCRIPTS_DIR/agent_gate.py" check-action
+        --primitive "$PRIMITIVE" --phase direct)
+    for host in "${HOSTS[@]}"; do gate_cmd+=(--host "$host"); done
+    for arg in "${PRIMITIVE_ARGS[@]}"; do gate_cmd+=(--arg "$arg"); done
+    gate_cmd+=("${CONFIRM_FLAGS[@]}")
+    "${gate_cmd[@]}"
+fi
 
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 RUN_DIR="$RUNS_DIR/$RUN_ID"
@@ -135,8 +143,15 @@ run_one() {
     local host="$1" out="$RESULT_DIR/${host}.json" err="$LOG_DIR/${host}.stderr" rc_file="$LOG_DIR/${host}.rc" rc local_err
     set +e
     if [[ -n "$PRIMITIVE" ]]; then
-        SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/$PRIMITIVE" "$host" "${PRIMITIVE_ARGS[@]}" >"$out" 2>"$err"
-        rc=$?
+        if [[ "$TIMEOUT_SEC" -gt 0 ]]; then
+            SSH_SKILL_RUN_ID="$RUN_ID" timeout "$TIMEOUT_SEC" \
+                bash "$SCRIPTS_DIR/$PRIMITIVE" "$host" "${PRIMITIVE_ARGS[@]}" "${CONFIRM_FLAGS[@]}" >"$out" 2>"$err"
+            rc=$?
+        else
+            SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/$PRIMITIVE" \
+                "$host" "${PRIMITIVE_ARGS[@]}" "${CONFIRM_FLAGS[@]}" >"$out" 2>"$err"
+            rc=$?
+        fi
     elif [[ "$TIMEOUT_SEC" -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
         SSH_SKILL_RUN_ID="$RUN_ID" timeout "$TIMEOUT_SEC" bash "$SCRIPTS_DIR/exec.sh" "$host" "$REMOTE_CMD" "${CONFIRM_FLAGS[@]}" --allow-raw-exec ${SUDO_FLAG:+"$SUDO_FLAG"} >"$out" 2>"$err"
         rc=$?

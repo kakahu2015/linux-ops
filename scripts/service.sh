@@ -27,8 +27,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
-  exec python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive service.sh \
-    --host "$HOST_NAMES" --arg "$ACTION" --arg "$SERVICE_NAME"
+  cmd=(python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive service.sh \
+    --host "$HOST_NAMES" --arg "$ACTION" --arg "$SERVICE_NAME")
+  cmd+=("${CONFIRM_FLAGS[@]}")
+  exec "${cmd[@]}"
 fi
 
 # Validate before use: SERVICE_NAME is interpolated directly into CMD below.

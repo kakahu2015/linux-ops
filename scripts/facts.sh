@@ -10,8 +10,18 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
 
-if [[ $# -eq 1 && "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
-    exec python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive facts.sh --host "$1"
+if [[ $# -gt 0 && "$1" != --* && "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
+    HOST_NAME="$1"
+    shift
+    cmd=(python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive facts.sh --host "$HOST_NAME")
+    for arg in "$@"; do
+        case "$arg" in
+          --confirm-risk|--confirm-path|--confirm-fleet|--confirm-prod|--confirm-destructive)
+            cmd+=("$arg") ;;
+          *) die_json "invalid_arg" "facts.sh 不接受该参数: $arg" "$HOST_NAME" ;;
+        esac
+    done
+    exec "${cmd[@]}"
 fi
 
 REMOTE_FACTS_CMD='set -e

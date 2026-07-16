@@ -43,7 +43,9 @@ source "$SCRIPTS_DIR/common.sh"
 if [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
     cmd=(python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive exec.sh \
         --host "$HOST_NAMES" --arg "$REMOTE_CMD")
+    cmd+=("${CONFIRM_FLAGS[@]}")
     [[ "${SSH_SKILL_ALLOW_RAW_EXEC:-}" == yes ]] && cmd+=(--allow-raw-exec)
+    [[ "$SUDO_RETRY" -eq 1 ]] && cmd+=(--sudo)
     exec "${cmd[@]}"
 fi
 
@@ -106,29 +108,42 @@ if echo "$HOST_NAMES" | grep -q ','; then
 fi
 
 HOST_NAME="$HOST_NAMES"
-STDOUT_FILE=$(mktemp)
-STDERR_FILE=$(mktemp)
-trap 'rm -f "$STDOUT_FILE" "$STDERR_FILE"' EXIT
 
-run_ssh() {
-    local cmd="$1"
-    timeout --signal=TERM "$COMMAND_TIMEOUT_SEC" bash "$SCRIPTS_DIR/ssh_transport.sh" "$HOST_NAME" "$cmd" \
-        >"$STDOUT_FILE" 2>"$STDERR_FILE"
-    return $?
+json_field() {
+    local field="$1"
+    python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+value = data.get(sys.argv[1], "")
+if isinstance(value, bool):
+    print("true" if value else "false")
+else:
+    print(value)
+' "$field"
+}
+
+run_transport() {
+    set +e
+    TRANSPORT_JSON=$(bash "$SCRIPTS_DIR/ssh_transport.sh" "$HOST_NAME" "$1")
+    EXIT_CODE=$?
+    set -e
+    if ! printf '%s' "$TRANSPORT_JSON" | python3 -m json.tool >/dev/null 2>&1; then
+        STDOUT_CONTENT=""
+        STDERR_CONTENT="invalid transport response"
+        EXIT_CODE=126
+        TRUNCATED=false
+    else
+        STDOUT_CONTENT=$(printf '%s' "$TRANSPORT_JSON" | json_field stdout)
+        STDERR_CONTENT=$(printf '%s' "$TRANSPORT_JSON" | json_field stderr)
+        TRUNCATED=$(printf '%s' "$TRANSPORT_JSON" | json_field truncated)
+    fi
 }
 
 START_MS=$(date +%s%3N 2>/dev/null || date +%s000)
 set +e
-run_ssh "$REMOTE_CMD"
-EXIT_CODE=$?
+run_transport "$REMOTE_CMD"
 set -e
 
-STDOUT_SIZE=$(wc -c <"$STDOUT_FILE")
-STDERR_SIZE=$(wc -c <"$STDERR_FILE")
-STDOUT_CONTENT=$(head -c "$OUTPUT_LIMIT_BYTES" "$STDOUT_FILE")
-STDERR_CONTENT=$(head -c "$OUTPUT_LIMIT_BYTES" "$STDERR_FILE")
-TRUNCATED=false
-[[ "$STDOUT_SIZE" -gt "$OUTPUT_LIMIT_BYTES" || "$STDERR_SIZE" -gt "$OUTPUT_LIMIT_BYTES" ]] && TRUNCATED=true
 ERROR_FIELD=""
 SUDO_USED=false
 
@@ -137,14 +152,8 @@ if [[ $EXIT_CODE -ne 0 ]] && echo "$STDERR_CONTENT" | grep -qi "Permission denie
     if [[ "$SUDO_RETRY" -eq 1 ]]; then
         SUDO_CMD="sudo bash -lc $(printf '%q' "$REMOTE_CMD")"
         set +e
-        run_ssh "$SUDO_CMD"
-        EXIT_CODE=$?
+        run_transport "$SUDO_CMD"
         set -e
-        STDOUT_SIZE=$(wc -c <"$STDOUT_FILE")
-        STDERR_SIZE=$(wc -c <"$STDERR_FILE")
-        STDOUT_CONTENT=$(head -c "$OUTPUT_LIMIT_BYTES" "$STDOUT_FILE")
-        STDERR_CONTENT=$(head -c "$OUTPUT_LIMIT_BYTES" "$STDERR_FILE")
-        [[ "$STDOUT_SIZE" -gt "$OUTPUT_LIMIT_BYTES" || "$STDERR_SIZE" -gt "$OUTPUT_LIMIT_BYTES" ]] && TRUNCATED=true
         SUDO_USED=true
         [[ $EXIT_CODE -eq 0 ]] && ERROR_FIELD=""
     fi

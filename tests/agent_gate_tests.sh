@@ -488,4 +488,11 @@ expect_failure_contains \
   env HOSTS_YAML="$ROOT/hosts.example.yaml" AUTONOMY_YAML="$ROOT/autonomy.example.yaml" \
     SSH_SKILL_GATE_CONTEXT=approved bash "$ROOT/scripts/service.sh" demo-edge-01 stop caddy
 
+expect_failure_contains \
+  "semantic runner applies one fleet gate" \
+  "fleet_confirmation_required" \
+  env HOSTS_YAML="$ROOT/hosts.example.yaml" AUTONOMY_YAML="$ROOT/autonomy.example.yaml" \
+    RUNS_DIR="$TMP_DIR/runs" bash "$ROOT/scripts/runner.sh" \
+      --hosts demo-edge-01,demo-worker-01 --primitive sys.sh --arg summary
+
 log "Completed $pass_count generic agent gate tests"

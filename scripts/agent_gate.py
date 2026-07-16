@@ -644,6 +644,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Run rollback_actions if verification fails")
     parser.add_argument("--allow-raw-exec", action="store_true", default=False,
                         help="Permit exec.sh when explicitly approved")
+    parser.add_argument("--sudo", action="store_true", default=False,
+                        help="Allow exec.sh one explicit sudo retry")
     parser.add_argument("--test-mode", action="store_true", default=False,
                         help="Allow unknown primitives (for test fixtures)")
     parser.add_argument("--gate-log-level", choices=["quiet", "normal", "verbose"],
@@ -1128,6 +1130,9 @@ def main() -> None:
             [part for item in args.host for part in str(item).split(",")]
         )
         action_args = [",".join(hosts)] + list(args.arg)
+        runtime_args = action_args.copy()
+        if args.primitive == "exec.sh" and args.sudo:
+            runtime_args.append("--sudo")
         if args.primitive == "exec.sh":
             policy_cmd = [sys.executable, str(scripts_dir / "agent_gate.py"),
                           "--policy-check", args.arg[0] if args.arg else "",
@@ -1165,7 +1170,7 @@ def main() -> None:
         if not assessment.allowed:
             die_json("action_blocked", "; ".join(assessment.reasons))
         rc, stdout, stderr = run_primitive(
-            "direct", args.primitive, action_args, primitives_dir, capture=True,
+            "direct", args.primitive, runtime_args, primitives_dir, capture=True,
             timeout_sec=int(os.environ.get("SSH_SKILL_TIMEOUT_SEC", "300")),
             output_limit_bytes=int(os.environ.get("OUTPUT_LIMIT_BYTES", "65536")),
         )
