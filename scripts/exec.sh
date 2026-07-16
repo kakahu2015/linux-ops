@@ -47,6 +47,10 @@ if [[ "${SSH_SKILL_STRUCTURED_GATE:-}" != yes ]]; then
     policy_check_command "$REMOTE_CMD" "$HOST_COUNT" "" "$HOST_NAMES"
 fi
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
+COMMAND_TIMEOUT_SEC="${SSH_SKILL_TIMEOUT_SEC:-300}"
+[[ "$COMMAND_TIMEOUT_SEC" =~ ^[0-9]+$ && "$COMMAND_TIMEOUT_SEC" -gt 0 ]] || {
+    echo '{"success":false,"error":"invalid_timeout"}' >&2; exit 2;
+}
 
 # 多主机兼容模式：仍支持逗号分隔，但输出聚合 JSON。
 # 大规模并发请使用 runner.sh。
@@ -95,35 +99,16 @@ if echo "$HOST_NAMES" | grep -q ','; then
 fi
 
 HOST_NAME="$HOST_NAMES"
-load_host_config "$HOST_NAME"
-CTL_SOCKET="$(control_socket "$HOST_NAME")"
-ensure_connected "$HOST_NAME" "$CTL_SOCKET"
-
-# 构建最终命令。default_workdir 是远端路径，非 ~ 路径做 shell 转义。
-if [[ -n "$DEFAULT_WORKDIR" ]]; then
-    if [[ "$DEFAULT_WORKDIR" == "~"* ]]; then
-        FULL_CMD="cd $DEFAULT_WORKDIR && $REMOTE_CMD"
-    else
-        FULL_CMD="cd $(printf '%q' "$DEFAULT_WORKDIR") && $REMOTE_CMD"
-    fi
-else
-    FULL_CMD="$REMOTE_CMD"
-fi
-
 STDOUT_FILE=$(mktemp)
 STDERR_FILE=$(mktemp)
 trap 'rm -f "$STDOUT_FILE" "$STDERR_FILE"' EXIT
 
 run_ssh() {
     local cmd="$1"
-    >"$STDOUT_FILE" >"$STDERR_FILE"
-    ssh \
-        -o "ControlMaster=no" \
-        -o "ControlPath=$CTL_SOCKET" \
-        -o "StrictHostKeyChecking=accept-new" \
-        -p "$SSH_PORT" \
-        "${SSH_USER}@${SSH_HOST}" \
-        "bash -lc $(printf '%q' "$cmd")" \
+    local transport_flags=()
+    [[ "$SUDO_RETRY" -eq 1 ]] && transport_flags+=(--sudo)
+    timeout --signal=TERM "$COMMAND_TIMEOUT_SEC" bash "$SCRIPTS_DIR/ssh_transport.sh" "$HOST_NAME" "$cmd" \
+        "${transport_flags[@]}" \
         >"$STDOUT_FILE" 2>"$STDERR_FILE"
     return $?
 }

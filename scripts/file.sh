@@ -35,14 +35,16 @@ for arg in "$@"; do
       *) GATE_ARGS+=("$arg") ;;
     esac
 done
-gate_action file.sh direct "$HOST_NAME" "$ACTION" "${GATE_ARGS[@]}"
+if [[ "${SSH_SKILL_GATE_CONTEXT:-}" != approved ]]; then
+    gate_action file.sh direct "$HOST_NAME" "$ACTION" "${GATE_ARGS[@]}"
+fi
 
 q() { printf '%q' "$1"; }
 
 run_file_cmd() {
     local cmd="$1" op="$2"
     set +e
-    RESULT=$(SSH_SKILL_STRUCTURED_GATE=yes SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/exec.sh" "$HOST_NAME" "$cmd" "$CONFIRM_FLAG")
+    RESULT=$(SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/ssh_transport.sh" "$HOST_NAME" "$cmd")
     RC=$?
     set -e
     SUCCESS=$([ "$RC" -eq 0 ] && echo true || echo false)
@@ -53,7 +55,7 @@ run_file_cmd() {
   "host": "$(json_escape "$HOST_NAME")",
   "primitive": "file",
   "action": "$(json_escape "$op")",
-  "result": $RESULT
+  "result": "$(json_escape "$RESULT")"
 }
 JSON
     exit "$RC"

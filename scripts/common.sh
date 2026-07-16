@@ -120,7 +120,7 @@ POLICY_LOCAL_YAML="${POLICY_LOCAL_YAML:-$SCRIPTS_DIR/policy.local.yaml}"
 
 policy_check_command() {
     local cmd="$1" host_count="${2:-1}" confirm="${3:-}" host_csv="${4:-}"
-    local confirm_fleet_flag="" confirm_prod_flag=""
+    local confirm_fleet_flag="" confirm_prod_flag="" confirm_destructive_flag=""
     local confirm_path_flag=""
     local confirm_risk_flag=""
     [[ "$confirm" == "--confirm-fleet" || "${SSH_SKILL_CONFIRM_FLEET:-}" == yes ]] && confirm_fleet_flag="--confirm-fleet"
@@ -129,6 +129,8 @@ policy_check_command() {
     [[ "${SSH_SKILL_CONFIRM_RISK:-}" == yes ]] && confirm_risk_flag="--confirm-risk"
     [[ "$confirm" == "--confirm-path" ]] && confirm_path_flag="--confirm-path"
     [[ "$confirm" == "--confirm-risk" ]] && confirm_risk_flag="--confirm-risk"
+    [[ "${SSH_SKILL_CONFIRM_DESTRUCTIVE:-}" == yes ]] && confirm_destructive_flag="--confirm-destructive"
+    [[ "$confirm" == "--confirm-destructive" ]] && confirm_destructive_flag="--confirm-destructive"
 
     local result
     result=$(python3 "$SCRIPTS_DIR/agent_gate.py" \
@@ -139,6 +141,7 @@ policy_check_command() {
         ${confirm_prod_flag:+"$confirm_prod_flag"} \
         ${confirm_path_flag:+"$confirm_path_flag"} \
         ${confirm_risk_flag:+"$confirm_risk_flag"} \
+        ${confirm_destructive_flag:+"$confirm_destructive_flag"} \
         2>/dev/null)
     local rc=$?
     if [[ $rc -ne 0 ]]; then

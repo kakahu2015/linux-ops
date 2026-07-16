@@ -18,11 +18,14 @@ source "$SCRIPTS_DIR/common.sh"
 
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 q() { printf '%q' "$1"; }
+if [[ "${SSH_SKILL_GATE_CONTEXT:-}" != approved ]]; then
+    gate_action net.sh direct "$HOST_NAME" "$ACTION" "$@"
+fi
 
 run_net_cmd() {
     local cmd="$1" op="$2"
     set +e
-    RESULT=$(SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/exec.sh" "$HOST_NAME" "$cmd")
+    RESULT=$(SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/ssh_transport.sh" "$HOST_NAME" "$cmd")
     RC=$?
     set -e
     SUCCESS=$([ "$RC" -eq 0 ] && echo true || echo false)
@@ -33,7 +36,7 @@ run_net_cmd() {
   "host": "$(json_escape "$HOST_NAME")",
   "primitive": "net",
   "action": "$(json_escape "$op")",
-  "result": $RESULT
+  "result": "$(json_escape "$RESULT")"
 }
 JSON
     exit "$RC"

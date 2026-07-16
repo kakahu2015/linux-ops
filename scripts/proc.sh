@@ -16,14 +16,25 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPTS_DIR/common.sh"
 
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
-CONFIRM_FLAG=""
-if [[ "${*: -1}" == "--confirm" ]]; then CONFIRM_FLAG="--confirm"; fi
+for arg in "$@"; do
+  case "$arg" in
+    --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes ;;
+    --confirm-path) SSH_SKILL_CONFIRM_PATH=yes ;;
+    --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes ;;
+    --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes ;;
+    --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes ;;
+    --confirm) die_json "invalid_confirmation" "禁止使用 legacy --confirm" "$HOST_NAME" ;;
+  esac
+done
+if [[ "${SSH_SKILL_GATE_CONTEXT:-}" != approved ]]; then
+  gate_action proc.sh direct "$HOST_NAME" "$ACTION" "$@"
+fi
 q() { printf '%q' "$1"; }
 
 run_proc_cmd() {
     local cmd="$1" op="$2"
     set +e
-    RESULT=$(SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/exec.sh" "$HOST_NAME" "$cmd" "$CONFIRM_FLAG")
+    RESULT=$(SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/ssh_transport.sh" "$HOST_NAME" "$cmd")
     RC=$?
     set -e
     SUCCESS=$([ "$RC" -eq 0 ] && echo true || echo false)
@@ -34,7 +45,7 @@ run_proc_cmd() {
   "host": "$(json_escape "$HOST_NAME")",
   "primitive": "proc",
   "action": "$(json_escape "$op")",
-  "result": $RESULT
+  "result": "$(json_escape "$RESULT")"
 }
 JSON
     exit "$RC"
@@ -66,7 +77,7 @@ case "$ACTION" in
     kill)
         PID="${1:?kill 缺少 pid}"
         [[ "$PID" =~ ^[0-9]+$ ]] || die_json "invalid_pid" "pid 必须是整数" "$HOST_NAME"
-        [[ "$CONFIRM_FLAG" == "--confirm" || "${SSH_SKILL_CONFIRMED:-}" == "yes" ]] || die_json "confirm_required" "kill 需要 --confirm 或 SSH_SKILL_CONFIRMED=yes" "$HOST_NAME"
+        [[ "${SSH_SKILL_CONFIRM_DESTRUCTIVE:-}" == yes ]] || die_json "confirm_required" "kill 需要 --confirm-destructive" "$HOST_NAME"
         run_proc_cmd "kill $PID && echo killed=$PID" "kill"
         ;;
     *)

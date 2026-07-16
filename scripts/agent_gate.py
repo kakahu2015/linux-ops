@@ -113,16 +113,16 @@ class Inventory:
         tags_lower = {str(tag).lower() for tag in tags} if isinstance(tags, list) else set()
         return env in {"prod", "production"} or bool(tags_lower & {"prod", "production"})
 
+    def environment_for_host(self, alias: str) -> str:
+        record = self.hosts.get(alias, {})
+        env = str(record.get("env", "unknown")).lower()
+        return "prod" if env == "production" else env
+
     def environment_for_hosts(self, aliases: list[str]) -> str:
-        environments = {str(self.hosts.get(alias, {}).get("env", "unknown")).lower()
-                        for alias in aliases}
-        if environments & {"prod", "production"}:
-            return "prod"
-        if "staging" in environments:
-            return "staging"
-        if environments:
+        environments = {self.environment_for_host(alias) for alias in aliases}
+        if len(environments) == 1:
             return next(iter(environments))
-        return "unknown"
+        return "mixed" if environments else "unknown"
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -308,33 +308,53 @@ def run_primitive(label: str, primitive: str, args: list[str],
     script = str(primitives_dir / primitive)
     cmd = [script] + args
     sys.stderr.write(f"[agent-gate] {label}: {primitive} {' '.join(shlex.quote(a) for a in args)}\n")
-    # Use files as bounded-output buffers.  This avoids retaining an unbounded
-    # child stdout/stderr in the gate process, and a process group lets timeout
-    # clean up descendants as well as the direct child.
+    # Drain both pipes while the child runs and retain only bounded prefixes;
+    # never spool untrusted output to /tmp or wait for the child before reading.
     import signal
-    out_file = tempfile.TemporaryFile()
-    err_file = tempfile.TemporaryFile()
     process = subprocess.Popen(
-        cmd, stdout=out_file, stderr=err_file,
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env={**os.environ, "SSH_SKILL_GATE_CONTEXT": "approved",
+             "SSH_SKILL_RUN_ID": _ESCALATION_RUN_ID or os.environ.get("SSH_SKILL_RUN_ID", make_run_id())},
         start_new_session=True,
     )
+    import selectors
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    truncated = {"stdout": False, "stderr": False}
     timed_out = False
-    try:
-        process.wait(timeout=timeout_sec)
-    except subprocess.TimeoutExpired:
-        timed_out = True
+    deadline = time.monotonic() + timeout_sec if timeout_sec else None
+    while selector.get_map():
+        remaining = None if deadline is None else max(0, deadline - time.monotonic())
+        if remaining == 0:
+            timed_out = True
+            break
+        for key, _ in selector.select(remaining):
+            chunk = os.read(key.fileobj.fileno(), 65536)
+            if not chunk:
+                selector.unregister(key.fileobj)
+                continue
+            name = key.data
+            if len(buffers[name]) < output_limit_bytes:
+                keep = output_limit_bytes - len(buffers[name])
+                buffers[name].extend(chunk[:keep])
+                if len(chunk) > keep:
+                    truncated[name] = True
+            else:
+                truncated[name] = True
+    if timed_out or process.poll() is None:
         try:
             os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-    out_file.seek(0)
-    err_file.seek(0)
-    stdout = out_file.read(output_limit_bytes).decode("utf-8", errors="replace") if capture else ""
-    stderr = err_file.read(output_limit_bytes).decode("utf-8", errors="replace") if capture else ""
-    out_file.close()
-    err_file.close()
+    selector.close()
+    stdout = bytes(buffers["stdout"]).decode("utf-8", errors="replace") if capture else ""
+    stderr = bytes(buffers["stderr"]).decode("utf-8", errors="replace") if capture else ""
+    if capture and (truncated["stdout"] or truncated["stderr"]):
+        stderr += "\n[output truncated]"
     return (124 if timed_out else process.returncode), stdout, stderr
 
 
@@ -764,6 +784,10 @@ class SemanticGuard:
 class PathPolicyGuard:
     """Block commands that target sensitive filesystem paths."""
 
+    FORBIDDEN_PATTERNS: list[tuple[re.Pattern, str]] = [
+        (re.compile(r"/root/\.openclaw/openclaw\.json(?:\s|$)"), "forbidden_path"),
+        (re.compile(r"/root/\.openclaw/agents/main/agent/auth-profiles\.json(?:\s|$)"), "forbidden_path"),
+    ]
     SENSITIVE_PATTERNS: list[tuple[re.Pattern, str]] = [
         (re.compile(r'/(etc/shadow|etc/sudoers|etc/sudoers\.d|etc/passwd-|etc/gshadow)($|\s)'),
          "sensitive_credential_file"),
@@ -778,6 +802,9 @@ class PathPolicyGuard:
     ]
 
     def check(self, cmd: str) -> str:
+        for pattern, desc in self.FORBIDDEN_PATTERNS:
+            if pattern.search(cmd):
+                return desc
         for pattern, desc in self.SENSITIVE_PATTERNS:
             if pattern.search(cmd):
                 return desc
@@ -865,7 +892,9 @@ def preflight_action(
         assessment.reasons.append("fleet_confirmation_required")
     if assessment.prod_target and assessment.mutating and not confirmations.production:
         assessment.reasons.append("production_confirmation_required")
-    if assessment.path_violation and not confirmations.path:
+    if assessment.path_violation == "forbidden_path":
+        assessment.reasons.append("forbidden_path")
+    elif assessment.path_violation and not confirmations.path:
         assessment.reasons.append("path_confirmation_required")
     command = action.args[1] if len(action.args) > 1 else ""
     command_rule = semantic_guard.command_rule(action.primitive, action.args)
@@ -891,6 +920,7 @@ def _run_policy_check(args: argparse.Namespace, scripts_dir: Path, skill_dir: Pa
     host_csv = args.host_csv
     confirmed_fleet = args.confirm_fleet
     confirmed_prod = args.confirm_prod
+    confirmed_destructive = args.confirm_destructive
 
     # Load deny/confirm rules from policy files (local overrides base)
     policy_files = [f for f in [policy_local, policy_yaml] if f.exists()]
@@ -898,19 +928,29 @@ def _run_policy_check(args: argparse.Namespace, scripts_dir: Path, skill_dir: Pa
     def _load_rules(path: Path) -> dict[str, list[dict]]:
         try:
             data = load_yaml_subset(path)
-        except ValueError:
-            return {}
+        except (OSError, ValueError) as exc:
+            die_json("policy_parse_error", f"Failed to parse raw command policy: {exc}")
         result: dict[str, list[dict]] = {}
-        for category in ("deny_always", "confirm_single_host", "confirm_fleet", "confirm_prod"):
+        for category in ("deny_always", "confirm_single_host", "confirm_fleet", "confirm_prod", "confirm_destructive"):
             entries = data.get(category)
+            if entries is not None and not isinstance(entries, list):
+                die_json("policy_parse_error", f"Policy category {category} must be a list")
             if isinstance(entries, list):
+                for rule in entries:
+                    if not isinstance(rule, dict) or not isinstance(rule.get("pattern"), str):
+                        die_json("policy_parse_error", f"Invalid rule in {path}:{category}")
+                    try:
+                        re.compile(rule["pattern"], re.IGNORECASE)
+                    except re.error as exc:
+                        die_json("policy_parse_error", f"Invalid regex in {path}:{category}: {exc}")
                 result[category] = entries
         return result
 
-    merged: dict[str, list[dict]] = {}
+    merged: dict[str, list[dict]] = {category: [] for category in
+                                     ("deny_always", "confirm_single_host", "confirm_fleet", "confirm_prod", "confirm_destructive")}
     for pf in reversed(policy_files):
         for cat, rules in _load_rules(pf).items():
-            merged[cat] = rules
+            merged[cat].extend(rules)
 
     matches: dict[str, list[dict]] = {category: [] for category in merged}
     for category, rules in merged.items():
@@ -920,8 +960,8 @@ def _run_policy_check(args: argparse.Namespace, scripts_dir: Path, skill_dir: Pa
                 try:
                     if re.search(pattern, cmd, re.IGNORECASE):
                         matches[category].append(rule)
-                except re.error:
-                    continue
+                except re.error as exc:
+                    die_json("policy_parse_error", f"Invalid regex in raw command policy: {exc}")
 
     if matches.get("deny_always"):
         rule = matches["deny_always"][0]
@@ -941,7 +981,7 @@ def _run_policy_check(args: argparse.Namespace, scripts_dir: Path, skill_dir: Pa
     actual_hosts = [h.strip() for h in host_csv.split(",") if h.strip()]
     prod_target = any(inventory.is_production(h) for h in actual_hosts)
     risks = [str(rule.get("risk", "low"))
-             for category in ("confirm_single_host", "confirm_fleet", "confirm_prod")
+             for category in ("confirm_single_host", "confirm_fleet", "confirm_prod", "confirm_destructive")
              for rule in matches.get(category, [])]
     matched_risk = max(risks or ["low"], key=risk_num)
     required: list[str] = []
@@ -951,12 +991,15 @@ def _run_policy_check(args: argparse.Namespace, scripts_dir: Path, skill_dir: Pa
         required.append("--confirm-fleet")
     if matches.get("confirm_prod") and prod_target:
         required.append("--confirm-prod")
+    if matches.get("confirm_destructive"):
+        required.append("--confirm-destructive")
     if matched_risk in {"medium", "high"}:
         required.append("--confirm-risk")
     missing = [flag for flag in dict.fromkeys(required)
                if not ((flag == "--confirm-risk" and args.confirm_risk)
                        or (flag == "--confirm-fleet" and confirmed_fleet)
-                       or (flag == "--confirm-prod" and confirmed_prod))]
+                       or (flag == "--confirm-prod" and confirmed_prod)
+                       or (flag == "--confirm-destructive" and confirmed_destructive))]
     if missing:
         matched_rule = ",".join(rule.get("id", "") for category in matches
                                  for rule in matches[category])
@@ -990,7 +1033,12 @@ def _run_structured_action_check(args: argparse.Namespace, scripts_dir: Path, sk
     inventory = Inventory(inventory_path)
     hosts = inventory.resolve_hosts(args.host)
     action_args = [",".join(hosts)] + list(args.arg)
-    environment = "prod" if any(inventory.is_production(host) for host in hosts) else "dev"
+    environment = inventory.environment_for_hosts(hosts)
+    environment_max_level = min(
+        (policy.env_max_level(inventory.environment_for_host(host)) for host in hosts),
+        key=level_num,
+        default=policy.default_level,
+    )
     assessment = preflight_action(
         ActionSpec(args.primitive, action_args, hosts, environment, args.phase),
         policy=policy,
@@ -1005,7 +1053,7 @@ def _run_structured_action_check(args: argparse.Namespace, scripts_dir: Path, sk
             raw_exec=args.allow_raw_exec,
         ),
         autonomy_level=os.environ.get("AUTONOMY_LEVEL", policy.env_max_level(environment)),
-        environment_max_level=policy.env_max_level(environment),
+        environment_max_level=environment_max_level,
         effective_max_hosts=policy.max_hosts,
         declared_hosts=hosts,
         primitives_dir=primitives_dir,
@@ -1058,8 +1106,6 @@ def main() -> None:
             default_policy = skill_dir / "autonomy.yaml"
             policy_file = default_policy if default_policy.exists() else None
 
-    decision = DecisionRecord(args.decision)
-
     validator = scripts_dir / "validate_decision.py"
     if validator.exists():
         result = subprocess.run(
@@ -1069,6 +1115,9 @@ def main() -> None:
         if result.returncode != 0:
             die_json("decision_invalid",
                      f"Decision record failed validation: {result.stderr.strip() or result.stdout.strip()}")
+
+    # Never construct a runtime record from unvalidated guardrail types.
+    decision = DecisionRecord(args.decision)
 
     policy = AutonomyPolicy(policy_file) if policy_file else AutonomyPolicy(Path("/dev/null"))
     policy_file_found = policy_file is not None and policy_file.exists()
@@ -1101,11 +1150,16 @@ def main() -> None:
     def assess_or_block(action: ActionSpec) -> ActionAssessment:
         actual_hosts = extract_action_hosts(action)
         actual_environment = inventory.environment_for_hosts(actual_hosts)
+        strict_environment_level = min(
+            (policy.env_max_level(inventory.environment_for_host(host)) for host in actual_hosts),
+            key=level_num,
+            default=policy.default_level,
+        )
         assessment = preflight_action(
             action, policy=policy, semantic_guard=semantic_guard,
             path_guard=path_guard, confirmations=confirmations,
             autonomy_level=decision.autonomy_level, primitives_dir=primitives_dir,
-            environment_max_level=policy.env_max_level(actual_environment),
+            environment_max_level=strict_environment_level,
             effective_max_hosts=effective_max_hosts,
             declared_hosts=decision.hosts,
             inventory=inventory, test_mode=args.test_mode,
@@ -1115,6 +1169,7 @@ def main() -> None:
             error = "semantic_blocked" if reason.startswith("semantic_blocked") else {
                 "unknown_primitive": "unknown_primitive",
                 "path_confirmation_required": "path_blocked",
+                "forbidden_path": "path_blocked",
                 "production_confirmation_required": "autonomy_blocked",
                 "fleet_confirmation_required": "autonomy_blocked",
                 "risk_confirmation_required": "autonomy_blocked",
@@ -1152,8 +1207,11 @@ def main() -> None:
         decision.primitive, decision.args, decision.hosts,
         decision.environment, "execute",
     )
-    effective_env_max_level = policy.env_max_level(
-        inventory.environment_for_hosts(extract_action_hosts(primary_action))
+    primary_hosts = extract_action_hosts(primary_action)
+    effective_env_max_level = min(
+        (policy.env_max_level(inventory.environment_for_host(host)) for host in primary_hosts),
+        key=level_num,
+        default=policy.default_level,
     )
     target_errors = validate_action_targets(primary_action, decision.hosts, inventory)
     if target_errors:

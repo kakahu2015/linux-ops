@@ -14,7 +14,7 @@ TARGET_EXPR=""
 REMOTE_CMD=""
 PARALLEL=10
 TIMEOUT_SEC=0
-CONFIRM_FLAG=""
+CONFIRM_FLAGS=()
 SUDO_FLAG=""
 FAIL_FAST_PERCENT=0
 
@@ -31,7 +31,11 @@ Execution:
   --parallel <n>            Max concurrent hosts, default: 10
   --timeout <sec>           Per-host timeout if GNU timeout exists, default: 0 disabled
   --fail-fast <percent>     Stop scheduling more hosts if failure rate reaches percent
-  --confirm                 Allow medium/high risk commands per policy
+  --confirm-risk            Allow medium/high risk commands per policy
+  --confirm-fleet           Confirm multi-host execution
+  --confirm-prod            Confirm production writes
+  --confirm-destructive     Confirm destructive commands
+  --allow-raw-exec          Approve raw command execution
   --sudo                    Retry with sudo only after Permission denied
 
 Output:
@@ -54,7 +58,11 @@ while [[ $# -gt 0 ]]; do
         --fail-fast)
             FAIL_FAST_PERCENT="${2:?--fail-fast 缺少百分比}"; FAIL_FAST_PERCENT="${FAIL_FAST_PERCENT%%%}"; shift 2 ;;
         --confirm)
-            CONFIRM_FLAG="--confirm"; shift ;;
+            die_json "invalid_confirmation" "禁止使用 legacy --confirm，请使用结构化确认参数" ;;
+        --confirm-risk|--confirm-fleet|--confirm-prod|--confirm-destructive)
+            CONFIRM_FLAGS+=("$1"); shift ;;
+        --allow-raw-exec)
+            SSH_SKILL_ALLOW_RAW_EXEC=yes; shift ;;
         --sudo)
             SUDO_FLAG="--sudo"; shift ;;
         -h|--help)
@@ -81,9 +89,25 @@ for h in "${RAW_HOSTS[@]}"; do
     [[ -n "$h" ]] && HOSTS+=("$h")
 done
 
+KNOWN_HOSTS="$(list_hosts "$HOSTS_YAML")"
+for host in "${HOSTS[@]}"; do
+    [[ "$host" =~ ^[A-Za-z0-9_.-]+$ ]] || die_json "invalid_host" "主机别名包含非法字符: $host"
+    grep -qxF "$host" <<<"$KNOWN_HOSTS" || die_json "unknown_host" "主机别名不在 inventory: $host"
+done
+
 TOTAL=${#HOSTS[@]}
 [[ "$TOTAL" -gt 0 ]] || die_json "empty_target" "没有匹配到目标主机"
-policy_check_command "$REMOTE_CMD" "$TOTAL" "$CONFIRM_FLAG" "$HOST_CSV"
+[[ "${SSH_SKILL_ALLOW_RAW_EXEC:-}" == yes ]] || die_json "raw_exec_blocked" "runner raw command requires --allow-raw-exec"
+for flag in "${CONFIRM_FLAGS[@]}"; do
+    case "$flag" in
+      --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes ;;
+      --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes ;;
+      --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes ;;
+      --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes ;;
+    esac
+done
+policy_check_command "$REMOTE_CMD" "$TOTAL" "" "$HOST_CSV"
+gate_action exec.sh direct "$HOST_CSV" "$REMOTE_CMD"
 
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 RUN_DIR="$RUNS_DIR/$RUN_ID"
@@ -95,10 +119,10 @@ run_one() {
     local host="$1" out="$RESULT_DIR/${host}.json" err="$LOG_DIR/${host}.stderr" rc_file="$LOG_DIR/${host}.rc" rc local_err
     set +e
     if [[ "$TIMEOUT_SEC" -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
-        SSH_SKILL_RUN_ID="$RUN_ID" timeout "$TIMEOUT_SEC" bash "$SCRIPTS_DIR/exec.sh" "$host" "$REMOTE_CMD" ${CONFIRM_FLAG:+"$CONFIRM_FLAG"} ${SUDO_FLAG:+"$SUDO_FLAG"} >"$out" 2>"$err"
+        SSH_SKILL_RUN_ID="$RUN_ID" timeout "$TIMEOUT_SEC" bash "$SCRIPTS_DIR/exec.sh" "$host" "$REMOTE_CMD" "${CONFIRM_FLAGS[@]}" --allow-raw-exec ${SUDO_FLAG:+"$SUDO_FLAG"} >"$out" 2>"$err"
         rc=$?
     else
-        SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/exec.sh" "$host" "$REMOTE_CMD" ${CONFIRM_FLAG:+"$CONFIRM_FLAG"} ${SUDO_FLAG:+"$SUDO_FLAG"} >"$out" 2>"$err"
+        SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/exec.sh" "$host" "$REMOTE_CMD" "${CONFIRM_FLAGS[@]}" --allow-raw-exec ${SUDO_FLAG:+"$SUDO_FLAG"} >"$out" 2>"$err"
         rc=$?
     fi
     set -e

@@ -47,6 +47,9 @@ EOF
         ;;
     *)
         HOST="$1"
-        bash "$SCRIPTS_DIR/exec.sh" "$HOST" "$REMOTE_FACTS_CMD"
+        if [[ "${SSH_SKILL_GATE_CONTEXT:-}" != approved ]]; then
+            gate_action facts.sh direct "$HOST"
+        fi
+        bash "$SCRIPTS_DIR/ssh_transport.sh" "$HOST" "$REMOTE_FACTS_CMD"
         ;;
 esac

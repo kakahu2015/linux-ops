@@ -1,5 +1,5 @@
 # SSH Skill - structured policy rules
-# Categories: deny_always, confirm_single_host, confirm_fleet, confirm_prod
+# Categories: deny_always, confirm_single_host, confirm_fleet, confirm_prod, confirm_destructive
 # Each rule matches against the raw command string (regex).
 # Rules are evaluated in order: deny_always → confirm_single → confirm_fleet → confirm_prod.
 # First match wins. If no rule matches, risk defaults to "low".
@@ -99,3 +99,9 @@ confirm_prod:
     pattern: '(^|\s)kubectl\s+(rollout|scale|apply)\s'
     risk: medium
     action: confirm_prod
+
+confirm_destructive:
+  - id: file_delete_recursive
+    pattern: '(^|\s)rm\s+(-r|-f|-[A-Za-z]*r[A-Za-z]*f)\s'
+    risk: high
+    action: confirm_destructive
