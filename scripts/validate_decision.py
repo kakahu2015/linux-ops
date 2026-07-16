@@ -204,9 +204,13 @@ def validate_decision(decision: Any, *, strict_opsec: bool = True) -> list[str]:
                 fail(errors, f"$.guardrails.{key}", "must be a boolean")
         if "policy_risk" in guardrails and guardrails["policy_risk"] not in RISKS:
             fail(errors, "$.guardrails.policy_risk", "must be one of low, medium, high, forbidden")
-        for key in ("max_hosts", "timeout_sec", "verification_timeout_sec", "rollback_timeout_sec", "output_limit_bytes"):
+        for key in ("max_hosts", "timeout_sec", "verification_timeout_sec", "rollback_timeout_sec"):
             if key in guardrails and (not isinstance(guardrails[key], int) or guardrails[key] < 0):
                 fail(errors, f"$.guardrails.{key}", "must be a non-negative integer")
+        if "output_limit_bytes" in guardrails and (
+                not isinstance(guardrails["output_limit_bytes"], int)
+                or guardrails["output_limit_bytes"] < 1):
+            fail(errors, "$.guardrails.output_limit_bytes", "must be >= 1")
         if "max_hosts" in guardrails and guardrails["max_hosts"] < 1:
             fail(errors, "$.guardrails.max_hosts", "must be >= 1")
         if "output_limit" in guardrails and not isinstance(guardrails["output_limit"], str):
@@ -227,6 +231,12 @@ def validate_decision(decision: Any, *, strict_opsec: bool = True) -> list[str]:
         fail(errors, "$.rollback", "must be an array of strings")
     if "escalation_reason" in decision and not isinstance(decision["escalation_reason"], str):
         fail(errors, "$.escalation_reason", "must be a string")
+
+    rollback_actions = decision.get("rollback_actions", []) or []
+    rollback_verification = decision.get("rollback_verification_actions", []) or []
+    if rollback_actions and not rollback_verification:
+        fail(errors, "$.rollback_verification_actions",
+             "must contain at least one read-only action when rollback_actions are present")
 
     if strict_opsec:
         for path, value in walk_strings(decision):

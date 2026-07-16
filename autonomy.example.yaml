@@ -111,7 +111,6 @@ allowed_unattended_primitives:
     - "file.sh:backup"
   L3:
     - "service.sh:restart"
-    - "service.sh:reload"
     - "pkg.sh:update-cache"
 
 always_escalate:

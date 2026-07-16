@@ -197,7 +197,7 @@ L2_EXTRA = [
 ]
 
 L3_EXTRA = [
-    "service.sh:restart", "service.sh:reload", "pkg.sh:update-cache", "file.sh:mkdir",
+    "service.sh:restart", "pkg.sh:update-cache", "file.sh:mkdir",
 ]
 
 
@@ -308,14 +308,34 @@ def run_primitive(label: str, primitive: str, args: list[str],
     script = str(primitives_dir / primitive)
     cmd = [script] + args
     sys.stderr.write(f"[agent-gate] {label}: {primitive} {' '.join(shlex.quote(a) for a in args)}\n")
+    # Use files as bounded-output buffers.  This avoids retaining an unbounded
+    # child stdout/stderr in the gate process, and a process group lets timeout
+    # clean up descendants as well as the direct child.
+    import signal
+    out_file = tempfile.TemporaryFile()
+    err_file = tempfile.TemporaryFile()
+    process = subprocess.Popen(
+        cmd, stdout=out_file, stderr=err_file,
+        start_new_session=True,
+    )
+    timed_out = False
     try:
-        if capture:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
-            return result.returncode, result.stdout[:output_limit_bytes], result.stderr[:output_limit_bytes]
-        result = subprocess.run(cmd, timeout=timeout_sec)
-        return result.returncode, "", ""
-    except subprocess.TimeoutExpired as exc:
-        return 124, str(exc.stdout or "")[:output_limit_bytes], str(exc.stderr or "")[:output_limit_bytes]
+        process.wait(timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+    out_file.seek(0)
+    err_file.seek(0)
+    stdout = out_file.read(output_limit_bytes).decode("utf-8", errors="replace") if capture else ""
+    stderr = err_file.read(output_limit_bytes).decode("utf-8", errors="replace") if capture else ""
+    out_file.close()
+    err_file.close()
+    return (124 if timed_out else process.returncode), stdout, stderr
 
 
 def _strip_yaml_comment(line: str) -> str:
@@ -730,13 +750,15 @@ class SemanticGuard:
         command_rule = self.command_rule(primitive, args)
         if "mutating" in command_rule:
             return bool(command_rule["mutating"])
-        return self.compute_risk(primitive, args) in {"medium", "high", "forbidden"}
+        # No implicit risk-based classification: incomplete metadata fails
+        # closed, otherwise a low-risk write could be mistaken for verify.
+        return True
 
     def allowed_phases(self, primitive: str, args: list[str]) -> list[str]:
         phases = self.command_rule(primitive, args).get("allowed_phases")
         if isinstance(phases, list):
             return [str(p) for p in phases]
-        return ["execute", "verify", "direct"] if not self.is_mutating(primitive, args) else ["execute", "rollback", "direct"]
+        return []
 
 
 class PathPolicyGuard:
@@ -890,76 +912,71 @@ def _run_policy_check(args: argparse.Namespace, scripts_dir: Path, skill_dir: Pa
         for cat, rules in _load_rules(pf).items():
             merged[cat] = rules
 
-    matched_rule: str = ""
-    matched_action: str = ""
-    matched_risk: str = "low"
-
-    for category in ("deny_always", "confirm_single_host", "confirm_fleet", "confirm_prod"):
-        for rule in merged.get(category, []):
+    matches: dict[str, list[dict]] = {category: [] for category in merged}
+    for category, rules in merged.items():
+        for rule in rules:
             pattern = rule.get("pattern", "")
-            if not pattern:
-                continue
-            try:
-                if re.search(pattern, cmd, re.IGNORECASE):
-                    matched_rule = rule.get("id", "")
-                    matched_action = category
-                    matched_risk = rule.get("risk", "low")
-                    break
-            except re.error:
-                continue
-        if matched_action:
-            break
+            if pattern:
+                try:
+                    if re.search(pattern, cmd, re.IGNORECASE):
+                        matches[category].append(rule)
+                except re.error:
+                    continue
 
-    if matched_action == "deny_always":
+    if matches.get("deny_always"):
+        rule = matches["deny_always"][0]
+        matched_rule = rule.get("id", "")
+        matched_risk = str(rule.get("risk", "low"))
         print(json.dumps({
             "success": False,
             "error": "policy_blocked",
             "message": f"Command blocked by policy rule '{matched_rule}'",
             "rule": matched_rule,
-            "action": matched_action,
+            "action": "deny_always",
             "risk": matched_risk,
         }, ensure_ascii=False))
         sys.exit(1)
 
-    needs_confirm = False
-    reason = ""
-    if matched_action == "confirm_single_host":
-        needs_confirm = True
-        reason = f"rule={matched_rule}"
-    elif matched_action == "confirm_fleet" and host_count > 1:
-        needs_confirm = True
-        reason = f"rule={matched_rule} hosts={host_count}"
-    elif matched_action == "confirm_prod":
-        needs_confirm = True
-        reason = f"rule={matched_rule} prod_target=true"
-    elif matched_risk == "high":
-        needs_confirm = True
-        reason = f"risk=high"
-    elif matched_risk == "medium" and host_count > 20:
-        needs_confirm = True
-        reason = f"risk=medium hosts={host_count}"
-
-    if needs_confirm:
-        bypass = (matched_action == "confirm_fleet" and confirmed_fleet) or \
-                 (matched_action == "confirm_prod" and confirmed_prod) or \
-                 (matched_risk in {"medium", "high"} and args.confirm_risk)
-        if not bypass:
-            flag_hint = "--confirm-fleet" if "fleet" in matched_action else "--confirm-prod"
-            print(json.dumps({
-                "success": False,
-                "error": "policy_blocked",
-                "message": f"Command requires confirmation: {reason}. Use {flag_hint}.",
-                "rule": matched_rule,
-                "action": matched_action,
-                "risk": matched_risk,
-            }, ensure_ascii=False))
-            sys.exit(1)
+    inventory = Inventory(Path(os.environ.get("HOSTS_YAML", str(skill_dir / "hosts.yaml"))))
+    actual_hosts = [h.strip() for h in host_csv.split(",") if h.strip()]
+    prod_target = any(inventory.is_production(h) for h in actual_hosts)
+    risks = [str(rule.get("risk", "low"))
+             for category in ("confirm_single_host", "confirm_fleet", "confirm_prod")
+             for rule in matches.get(category, [])]
+    matched_risk = max(risks or ["low"], key=risk_num)
+    required: list[str] = []
+    if matches.get("confirm_single_host"):
+        required.append("--confirm-risk")
+    if matches.get("confirm_fleet") and host_count > 1:
+        required.append("--confirm-fleet")
+    if matches.get("confirm_prod") and prod_target:
+        required.append("--confirm-prod")
+    if matched_risk in {"medium", "high"}:
+        required.append("--confirm-risk")
+    missing = [flag for flag in dict.fromkeys(required)
+               if not ((flag == "--confirm-risk" and args.confirm_risk)
+                       or (flag == "--confirm-fleet" and confirmed_fleet)
+                       or (flag == "--confirm-prod" and confirmed_prod))]
+    if missing:
+        matched_rule = ",".join(rule.get("id", "") for category in matches
+                                 for rule in matches[category])
+        print(json.dumps({
+            "success": False,
+            "error": "policy_blocked",
+            "message": f"Command requires confirmation: {', '.join(missing)}",
+            "rule": matched_rule,
+            "action": "confirmation_required",
+            "risk": matched_risk,
+        }, ensure_ascii=False))
+        sys.exit(1)
 
     print(json.dumps({
         "success": True,
         "risk": matched_risk,
-        "rule": matched_rule or "",
-        "action": matched_action or "allowed",
+        "rule": "",
+        "action": "allowed",
+        "prod_target": prod_target,
+        "host_count": host_count,
     }, ensure_ascii=False))
     sys.exit(0)
 

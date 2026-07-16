@@ -311,6 +311,50 @@ expect_failure_contains \
   "risk_mismatch" \
   env AGENT_GATE_PRIMITIVES_DIR="$ROOT/scripts" bash "$ROOT/scripts/agent_gate.sh" --decision "$RISK_MISMATCH_DECISION" --policy "$ROOT/autonomy.example.yaml" --dry-run
 
+TARGET_SCOPE_MISMATCH="$TMP_DIR/target-scope-mismatch.json"
+cp "$VALID_DECISION" "$TARGET_SCOPE_MISMATCH"
+python3 - "$TARGET_SCOPE_MISMATCH" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["target_scope"] = {"hosts": ["demo-edge-01"], "environment": "dev"}
+d["action"]["args"][0] = "demo-worker-01"
+json.dump(d, open(p, "w"))
+PY
+expect_failure_contains \
+  "agent_gate binds declared and actual primary hosts" \
+  "action_target_scope_mismatch" \
+  env AGENT_GATE_PRIMITIVES_DIR="$ROOT/scripts" HOSTS_YAML="$ROOT/hosts.example.yaml" bash "$ROOT/scripts/agent_gate.sh" --decision "$TARGET_SCOPE_MISMATCH" --policy "$ROOT/autonomy.example.yaml" --dry-run
+
+ROLLBACK_EMPTY="$TMP_DIR/rollback-empty.json"
+cp "$VALID_DECISION" "$ROLLBACK_EMPTY"
+python3 - "$ROLLBACK_EMPTY" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["rollback_actions"] = [{"primitive": "sys.sh", "args": ["demo-edge-01", "summary"]}]
+d["rollback_verification_actions"] = []
+json.dump(d, open(p, "w"))
+PY
+expect_failure_contains \
+  "validate_decision rejects empty rollback verification" \
+  "rollback_verification_actions" \
+  python3 "$ROOT/scripts/validate_decision.py" "$ROLLBACK_EMPTY" --quiet
+
+LOCK_VERIFY="$TMP_DIR/lock-verify.json"
+cp "$VALID_DECISION" "$LOCK_VERIFY"
+python3 - "$LOCK_VERIFY" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["verification_actions"] = [{"primitive": "lock.sh", "args": ["demo-edge-01", "acquire"]}]
+json.dump(d, open(p, "w"))
+PY
+expect_failure_contains \
+  "agent_gate rejects mutating lock acquire as verification" \
+  "phase_blocked" \
+  env AGENT_GATE_PRIMITIVES_DIR="$ROOT/scripts" HOSTS_YAML="$ROOT/hosts.example.yaml" bash "$ROOT/scripts/agent_gate.sh" --decision "$LOCK_VERIFY" --policy "$ROOT/autonomy.example.yaml" --dry-run --confirm-risk
+
 PATH_BLOCK_DECISION="$TMP_DIR/path-block.json"
 write_decision "$PATH_BLOCK_DECISION" "L1" "low" "dev" "file.sh" '["demo-host-01", "grep", "/etc/shadow", "root"]' 1 false '["demo-host-01"]'
 expect_failure_contains \
