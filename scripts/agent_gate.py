@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -311,12 +312,31 @@ def run_primitive(label: str, primitive: str, args: list[str],
     # Drain both pipes while the child runs and retain only bounded prefixes;
     # never spool untrusted output to /tmp or wait for the child before reading.
     import signal
-    process = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env={**os.environ, "SSH_SKILL_GATE_CONTEXT": "approved",
-             "SSH_SKILL_RUN_ID": _ESCALATION_RUN_ID or os.environ.get("SSH_SKILL_RUN_ID", make_run_id())},
-        start_new_session=True,
-    )
+    fd, capability_path = tempfile.mkstemp(prefix="agent-cap-")
+    os.close(fd)
+    capability_file = Path(capability_path)
+    capability_file.write_text(json.dumps({
+        "token": secrets.token_hex(32),
+        "run_id": _ESCALATION_RUN_ID or os.environ.get("SSH_SKILL_RUN_ID", make_run_id()),
+        "primitive": primitive,
+        "hosts": args[0] if args else "",
+        "expires_at": time.time() + 60,
+    }))
+    os.chmod(capability_file, 0o600)
+    child_env = os.environ.copy()
+    capability = json.loads(capability_file.read_text())
+    child_env["SSH_SKILL_CAPABILITY_FILE"] = str(capability_file)
+    child_env["SSH_SKILL_CAPABILITY_TOKEN"] = capability["token"]
+    child_env["SSH_SKILL_EXECUTOR_CONTEXT"] = "internal"
+    child_env["SSH_SKILL_RUN_ID"] = capability["run_id"]
+    try:
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_env,
+            start_new_session=True,
+        )
+    except Exception:
+        capability_file.unlink(missing_ok=True)
+        raise
     import selectors
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ, "stdout")
@@ -355,6 +375,7 @@ def run_primitive(label: str, primitive: str, args: list[str],
     stderr = bytes(buffers["stderr"]).decode("utf-8", errors="replace") if capture else ""
     if capture and (truncated["stdout"] or truncated["stderr"]):
         stderr += "\n[output truncated]"
+    capability_file.unlink(missing_ok=True)
     return (124 if timed_out else process.returncode), stdout, stderr
 
 
@@ -607,7 +628,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Validate and print planned action without executing")
     parser.add_argument("--execute", action="store_true", default=False,
                         help="Execute action after gate checks")
-    parser.add_argument("command", nargs="?", choices=["check-action"],
+    parser.add_argument("command", nargs="?", choices=["check-action", "run-action"],
                         help="Structured primitive gate mode")
     parser.add_argument("--confirm-risk", action="store_true", default=False,
                         help="Allow actions whose autonomy level or risk exceeds policy limits")
@@ -641,9 +662,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         default="direct", help="Action phase for check-action")
     args = parser.parse_args(argv)
 
-    if args.command == "check-action":
+    # Direct primitive entrypoint: the primitive is still preflighted and then
+    # re-entered with an internal executor context.
+    if args.command in {"check-action", "run-action"}:
         if not args.primitive:
-            parser.error("--primitive is required with check-action")
+            parser.error("--primitive is required with action command")
         return args
 
     if args.policy_check is None:
@@ -785,8 +808,8 @@ class PathPolicyGuard:
     """Block commands that target sensitive filesystem paths."""
 
     FORBIDDEN_PATTERNS: list[tuple[re.Pattern, str]] = [
-        (re.compile(r"/root/\.openclaw/openclaw\.json(?:\s|$)"), "forbidden_path"),
-        (re.compile(r"/root/\.openclaw/agents/main/agent/auth-profiles\.json(?:\s|$)"), "forbidden_path"),
+        (re.compile(r'''(?<![A-Za-z0-9_.-])/root/\.openclaw/openclaw\.json(?=$|[\s"';|&<>])'''), "forbidden_path"),
+        (re.compile(r'''(?<![A-Za-z0-9_.-])/root/\.openclaw/agents/main/agent/auth-profiles\.json(?=$|[\s"';|&<>])'''), "forbidden_path"),
     ]
     SENSITIVE_PATTERNS: list[tuple[re.Pattern, str]] = [
         (re.compile(r'/(etc/shadow|etc/sudoers|etc/sudoers\.d|etc/passwd-|etc/gshadow)($|\s)'),
@@ -1096,6 +1119,61 @@ def main() -> None:
     _ESCALATION_AUDIT_DIR = audit_dir
     _ESCALATION_WEBHOOK_URL = os.environ.get("ESCALATION_URL") or None
     _ESCALATION_RUN_ID = os.environ.get("SSH_SKILL_RUN_ID", make_run_id())
+
+    if args.command == "run-action":
+        policy_file = Path(os.environ.get("AUTONOMY_YAML", str(skill_dir / "autonomy.yaml")))
+        policy = AutonomyPolicy(policy_file) if policy_file.exists() else AutonomyPolicy(Path("/dev/null"))
+        inventory = Inventory(hosts_yaml)
+        hosts = inventory.resolve_hosts(
+            [part for item in args.host for part in str(item).split(",")]
+        )
+        action_args = [",".join(hosts)] + list(args.arg)
+        if args.primitive == "exec.sh":
+            policy_cmd = [sys.executable, str(scripts_dir / "agent_gate.py"),
+                          "--policy-check", args.arg[0] if args.arg else "",
+                          "--host-count", str(len(hosts)), "--host-csv", ",".join(hosts)]
+            for flag, enabled in (("--confirm-risk", args.confirm_risk or os.environ.get("SSH_SKILL_CONFIRM_RISK") == "yes"),
+                                  ("--confirm-fleet", args.confirm_fleet or os.environ.get("SSH_SKILL_CONFIRM_FLEET") == "yes"),
+                                  ("--confirm-prod", args.confirm_prod or os.environ.get("SSH_SKILL_CONFIRM_PROD") == "yes"),
+                                  ("--confirm-destructive", args.confirm_destructive or os.environ.get("SSH_SKILL_CONFIRM_DESTRUCTIVE") == "yes")):
+                if enabled:
+                    policy_cmd.append(flag)
+            policy_result = subprocess.run(policy_cmd, capture_output=True, text=True)
+            if policy_result.returncode != 0:
+                die_json("policy_blocked", policy_result.stdout.strip() or policy_result.stderr.strip())
+        strict_level = min(
+            (policy.env_max_level(inventory.environment_for_host(host)) for host in hosts),
+            key=level_num, default=policy.default_level,
+        )
+        confirmations = ConfirmationSet(
+            risk=args.confirm_risk or os.environ.get("SSH_SKILL_CONFIRM_RISK") == "yes",
+            path=args.confirm_path or os.environ.get("SSH_SKILL_CONFIRM_PATH") == "yes",
+            fleet=args.confirm_fleet or os.environ.get("SSH_SKILL_CONFIRM_FLEET") == "yes",
+            production=args.confirm_prod or os.environ.get("SSH_SKILL_CONFIRM_PROD") == "yes",
+            destructive=args.confirm_destructive or os.environ.get("SSH_SKILL_CONFIRM_DESTRUCTIVE") == "yes",
+            raw_exec=args.allow_raw_exec or os.environ.get("SSH_SKILL_ALLOW_RAW_EXEC") == "yes",
+        )
+        assessment = preflight_action(
+            ActionSpec(args.primitive, action_args, hosts, inventory.environment_for_hosts(hosts), "direct"),
+            policy=policy, semantic_guard=SemanticGuard(rules_path, test_mode=args.test_mode),
+            path_guard=PathPolicyGuard(), confirmations=confirmations,
+            autonomy_level=os.environ.get("AUTONOMY_LEVEL", policy.default_level),
+            environment_max_level=strict_level, effective_max_hosts=policy.max_hosts,
+            declared_hosts=hosts, primitives_dir=primitives_dir, inventory=inventory,
+            test_mode=args.test_mode,
+        )
+        if not assessment.allowed:
+            die_json("action_blocked", "; ".join(assessment.reasons))
+        rc, stdout, stderr = run_primitive(
+            "direct", args.primitive, action_args, primitives_dir, capture=True,
+            timeout_sec=int(os.environ.get("SSH_SKILL_TIMEOUT_SEC", "300")),
+            output_limit_bytes=int(os.environ.get("OUTPUT_LIMIT_BYTES", "65536")),
+        )
+        if stdout:
+            print(stdout, end="" if stdout.endswith("\n") else "\n")
+        if stderr:
+            print(stderr, file=sys.stderr, end="" if stderr.endswith("\n") else "\n")
+        sys.exit(rc)
 
     policy_file = args.policy
     if policy_file is None:

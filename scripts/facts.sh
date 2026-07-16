@@ -10,6 +10,10 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
 
+if [[ $# -eq 1 && "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
+    exec python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive facts.sh --host "$1"
+fi
+
 REMOTE_FACTS_CMD='set -e
 printf "collected_at=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
 printf "hostname=%s\n" "$(hostname 2>/dev/null || echo unknown)"
@@ -30,12 +34,12 @@ case "$1" in
     --hosts)
         HOSTS="${2:?--hosts 缺少值}"
         shift 2
-        bash "$SCRIPTS_DIR/runner.sh" --hosts "$HOSTS" --cmd "$REMOTE_FACTS_CMD" "$@"
+        bash "$SCRIPTS_DIR/runner.sh" --hosts "$HOSTS" --primitive facts.sh "$@"
         ;;
     --target)
         TARGET="${2:?--target 缺少表达式}"
         shift 2
-        bash "$SCRIPTS_DIR/runner.sh" --target "$TARGET" --cmd "$REMOTE_FACTS_CMD" "$@"
+        bash "$SCRIPTS_DIR/runner.sh" --target "$TARGET" --primitive facts.sh "$@"
         ;;
     -h|--help)
         cat <<'EOF'
@@ -47,9 +51,6 @@ EOF
         ;;
     *)
         HOST="$1"
-        if [[ "${SSH_SKILL_GATE_CONTEXT:-}" != approved ]]; then
-            gate_action facts.sh direct "$HOST"
-        fi
         bash "$SCRIPTS_DIR/ssh_transport.sh" "$HOST" "$REMOTE_FACTS_CMD"
         ;;
 esac

@@ -31,6 +31,16 @@
       "unattended": {"L1": true, "L2": true, "L3": true},
       "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
+    "patrol_host.sh": {
+      "description": "Per-host observation patrol",
+      "commands": {"*": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]}},
+      "arg0": "host",
+      "arg1": "service",
+      "allowed_args": ["*"],
+      "risk": "low",
+      "unattended": {"L1": true, "L2": true, "L3": true},
+      "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
+    },
     "file.sh": {
       "description": "File operations",
       "commands": {

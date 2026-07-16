@@ -12,6 +12,8 @@ source "$SCRIPTS_DIR/common.sh"
 HOST_CSV=""
 TARGET_EXPR=""
 REMOTE_CMD=""
+PRIMITIVE=""
+PRIMITIVE_ARGS=()
 PARALLEL=10
 TIMEOUT_SEC=0
 CONFIRM_FLAGS=()
@@ -20,7 +22,7 @@ FAIL_FAST_PERCENT=0
 
 usage() {
     cat <<'USAGE'
-Usage: runner.sh (--hosts <csv>|--target <expr>) --cmd <command> [options]
+Usage: runner.sh (--hosts <csv>|--target <expr>) (--cmd <command>|--primitive <name> [--arg value]) [options]
 
 Targeting:
   --hosts <csv>             Explicit hosts, e.g. hk,us-west,google
@@ -28,6 +30,8 @@ Targeting:
 
 Execution:
   --cmd <command>           Remote command to execute
+  --primitive <name>        Semantic primitive to execute per host
+  --arg <value>             Argument passed to semantic primitive
   --parallel <n>            Max concurrent hosts, default: 10
   --timeout <sec>           Per-host timeout if GNU timeout exists, default: 0 disabled
   --fail-fast <percent>     Stop scheduling more hosts if failure rate reaches percent
@@ -51,6 +55,10 @@ while [[ $# -gt 0 ]]; do
             TARGET_EXPR="${2:?--target 缺少表达式}"; shift 2 ;;
         --cmd)
             REMOTE_CMD="${2:?--cmd 缺少命令}"; shift 2 ;;
+        --primitive)
+            PRIMITIVE="${2:?primitive missing}"; shift 2 ;;
+        --arg)
+            PRIMITIVE_ARGS+=("${2:?arg missing}"); shift 2 ;;
         --parallel)
             PARALLEL="${2:?--parallel 缺少值}"; shift 2 ;;
         --timeout)
@@ -72,7 +80,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -n "$REMOTE_CMD" ]] || die_json "missing_arg" "缺少 --cmd"
+[[ -n "$REMOTE_CMD" || -n "$PRIMITIVE" ]] || die_json "missing_arg" "缺少 --cmd 或 --primitive"
+[[ -z "$REMOTE_CMD" || -z "$PRIMITIVE" ]] || die_json "invalid_arg" "--cmd 与 --primitive 不能同时使用"
 [[ -n "$HOST_CSV" || -n "$TARGET_EXPR" ]] || die_json "missing_arg" "必须提供 --hosts 或 --target"
 [[ "$PARALLEL" =~ ^[0-9]+$ && "$PARALLEL" -ge 1 ]] || die_json "invalid_arg" "--parallel 必须是正整数"
 [[ "$TIMEOUT_SEC" =~ ^[0-9]+$ ]] || die_json "invalid_arg" "--timeout 必须是整数秒"
@@ -97,7 +106,12 @@ done
 
 TOTAL=${#HOSTS[@]}
 [[ "$TOTAL" -gt 0 ]] || die_json "empty_target" "没有匹配到目标主机"
-[[ "${SSH_SKILL_ALLOW_RAW_EXEC:-}" == yes ]] || die_json "raw_exec_blocked" "runner raw command requires --allow-raw-exec"
+if [[ -n "$PRIMITIVE" ]]; then
+    [[ "$PRIMITIVE" =~ ^[A-Za-z0-9_.-]+\.sh$ ]] || die_json "invalid_primitive" "primitive 名称非法: $PRIMITIVE"
+    [[ -f "$SCRIPTS_DIR/$PRIMITIVE" ]] || die_json "unknown_primitive" "primitive 不存在: $PRIMITIVE"
+else
+    [[ "${SSH_SKILL_ALLOW_RAW_EXEC:-}" == yes ]] || die_json "raw_exec_blocked" "runner raw command requires --allow-raw-exec"
+fi
 for flag in "${CONFIRM_FLAGS[@]}"; do
     case "$flag" in
       --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes ;;
@@ -106,8 +120,10 @@ for flag in "${CONFIRM_FLAGS[@]}"; do
       --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes ;;
     esac
 done
-policy_check_command "$REMOTE_CMD" "$TOTAL" "" "$HOST_CSV"
-gate_action exec.sh direct "$HOST_CSV" "$REMOTE_CMD"
+if [[ -n "$REMOTE_CMD" ]]; then
+    policy_check_command "$REMOTE_CMD" "$TOTAL" "" "$HOST_CSV"
+    gate_action exec.sh direct "$HOST_CSV" "$REMOTE_CMD"
+fi
 
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 RUN_DIR="$RUNS_DIR/$RUN_ID"
@@ -118,7 +134,10 @@ mkdir -p "$RESULT_DIR" "$LOG_DIR"
 run_one() {
     local host="$1" out="$RESULT_DIR/${host}.json" err="$LOG_DIR/${host}.stderr" rc_file="$LOG_DIR/${host}.rc" rc local_err
     set +e
-    if [[ "$TIMEOUT_SEC" -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
+    if [[ -n "$PRIMITIVE" ]]; then
+        SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/$PRIMITIVE" "$host" "${PRIMITIVE_ARGS[@]}" >"$out" 2>"$err"
+        rc=$?
+    elif [[ "$TIMEOUT_SEC" -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
         SSH_SKILL_RUN_ID="$RUN_ID" timeout "$TIMEOUT_SEC" bash "$SCRIPTS_DIR/exec.sh" "$host" "$REMOTE_CMD" "${CONFIRM_FLAGS[@]}" --allow-raw-exec ${SUDO_FLAG:+"$SUDO_FLAG"} >"$out" 2>"$err"
         rc=$?
     else

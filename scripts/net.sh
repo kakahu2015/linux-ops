@@ -16,11 +16,13 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
 
+if [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
+    cmd=(python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive net.sh --host "$HOST_NAME" --arg "$ACTION")
+    for arg in "$@"; do cmd+=(--arg "$arg"); done
+    exec "${cmd[@]}"
+fi
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 q() { printf '%q' "$1"; }
-if [[ "${SSH_SKILL_GATE_CONTEXT:-}" != approved ]]; then
-    gate_action net.sh direct "$HOST_NAME" "$ACTION" "$@"
-fi
 
 run_net_cmd() {
     local cmd="$1" op="$2"
@@ -36,7 +38,7 @@ run_net_cmd() {
   "host": "$(json_escape "$HOST_NAME")",
   "primitive": "net",
   "action": "$(json_escape "$op")",
-  "result": "$(json_escape "$RESULT")"
+  "result": $RESULT
 }
 JSON
     exit "$RC"

@@ -26,6 +26,11 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
+  exec python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive service.sh \
+    --host "$HOST_NAMES" --arg "$ACTION" --arg "$SERVICE_NAME"
+fi
+
 # Validate before use: SERVICE_NAME is interpolated directly into CMD below.
 # This regex is the only barrier preventing shell injection through $SERVICE_NAME.
 [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+$ ]] || die_json "invalid_service" "服务名包含非法字符: $SERVICE_NAME"
@@ -57,9 +62,6 @@ case "$ACTION" in
     ;;
 esac
 
-if [[ "${SSH_SKILL_GATE_CONTEXT:-}" != approved ]]; then
-  gate_action service.sh direct "$HOST_NAMES" "$ACTION" "$SERVICE_NAME"
-fi
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 
 EXEC_FLAGS=("${CONFIRM_FLAGS[@]}")
@@ -77,7 +79,7 @@ cat <<JSON
   "host_target": "$(safe_json_string "$HOST_NAMES")",
   "action": "$(safe_json_string "$ACTION")",
   "service": "$(safe_json_string "$SERVICE_NAME")",
-  "result": "$(json_escape "$RESULT")"
+  "result": $RESULT
 }
 JSON
 exit "$RC"

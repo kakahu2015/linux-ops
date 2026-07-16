@@ -74,7 +74,7 @@ printf "service_%s=%s\n" "$SERVICE_NAME" "$SERVICE_STATE"
 printf "reasons=%s\n" "${REASONS:-none}"
 exit 0'
 
-ARGS=(--cmd "$REMOTE_PATROL_CMD" --parallel "$PARALLEL" --timeout "$TIMEOUT_SEC")
+ARGS=(--primitive patrol_host.sh --arg "$SERVICE" --arg "$DISK_THRESHOLD" --parallel "$PARALLEL" --timeout "$TIMEOUT_SEC")
 if [[ -n "$TARGET" ]]; then
     bash "$SCRIPTS_DIR/runner.sh" --target "$TARGET" "${ARGS[@]}"
 else

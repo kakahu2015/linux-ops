@@ -40,9 +40,16 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
 
+if [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
+    cmd=(python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive exec.sh \
+        --host "$HOST_NAMES" --arg "$REMOTE_CMD")
+    [[ "${SSH_SKILL_ALLOW_RAW_EXEC:-}" == yes ]] && cmd+=(--allow-raw-exec)
+    exec "${cmd[@]}"
+fi
+
 HOST_COUNT=$(host_count_from_csv "$HOST_NAMES")
 OUTPUT_LIMIT_BYTES="${OUTPUT_LIMIT_BYTES:-65536}"
-if [[ "${SSH_SKILL_STRUCTURED_GATE:-}" != yes ]]; then
+if [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal && "${SSH_SKILL_STRUCTURED_GATE:-}" != yes ]]; then
     gate_action exec.sh direct "$HOST_NAMES" "$REMOTE_CMD"
     policy_check_command "$REMOTE_CMD" "$HOST_COUNT" "" "$HOST_NAMES"
 fi
@@ -105,17 +112,14 @@ trap 'rm -f "$STDOUT_FILE" "$STDERR_FILE"' EXIT
 
 run_ssh() {
     local cmd="$1"
-    local transport_flags=()
-    [[ "$SUDO_RETRY" -eq 1 ]] && transport_flags+=(--sudo)
     timeout --signal=TERM "$COMMAND_TIMEOUT_SEC" bash "$SCRIPTS_DIR/ssh_transport.sh" "$HOST_NAME" "$cmd" \
-        "${transport_flags[@]}" \
         >"$STDOUT_FILE" 2>"$STDERR_FILE"
     return $?
 }
 
 START_MS=$(date +%s%3N 2>/dev/null || date +%s000)
 set +e
-run_ssh "$FULL_CMD"
+run_ssh "$REMOTE_CMD"
 EXIT_CODE=$?
 set -e
 
@@ -128,16 +132,10 @@ TRUNCATED=false
 ERROR_FIELD=""
 SUDO_USED=false
 
-# 权限不足时不再自动 sudo。默认返回 permission_denied + suggestion。
-# 只有显式 --sudo 或 SSH_SKILL_ALLOW_SUDO_RETRY=yes 才自动重试。
 if [[ $EXIT_CODE -ne 0 ]] && echo "$STDERR_CONTENT" | grep -qi "Permission denied"; then
     ERROR_FIELD="permission_denied"
-    if [[ "$SUDO_RETRY" -eq 1 || "${SSH_SKILL_ALLOW_SUDO_RETRY:-}" == "yes" ]]; then
-        SUDO_CMD="sudo bash -lc $(printf '%q' "$FULL_CMD")"
-        if [[ "${SSH_SKILL_STRUCTURED_GATE:-}" != yes ]]; then
-        policy_check_command "$SUDO_CMD" "$HOST_COUNT" "" "$HOST_NAME"
-        fi
-        echo "[ssh-skill] 检测到权限不足，按显式授权尝试 sudo 重新执行..." >&2
+    if [[ "$SUDO_RETRY" -eq 1 ]]; then
+        SUDO_CMD="sudo bash -lc $(printf '%q' "$REMOTE_CMD")"
         set +e
         run_ssh "$SUDO_CMD"
         EXIT_CODE=$?

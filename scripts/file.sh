@@ -35,8 +35,10 @@ for arg in "$@"; do
       *) GATE_ARGS+=("$arg") ;;
     esac
 done
-if [[ "${SSH_SKILL_GATE_CONTEXT:-}" != approved ]]; then
-    gate_action file.sh direct "$HOST_NAME" "$ACTION" "${GATE_ARGS[@]}"
+if [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
+    cmd=(python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive file.sh --host "$HOST_NAME" --arg "$ACTION")
+    for arg in "${GATE_ARGS[@]}"; do cmd+=(--arg "$arg"); done
+    exec "${cmd[@]}"
 fi
 
 q() { printf '%q' "$1"; }
@@ -55,7 +57,7 @@ run_file_cmd() {
   "host": "$(json_escape "$HOST_NAME")",
   "primitive": "file",
   "action": "$(json_escape "$op")",
-  "result": "$(json_escape "$RESULT")"
+  "result": $RESULT
 }
 JSON
     exit "$RC"

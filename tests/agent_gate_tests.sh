@@ -457,4 +457,35 @@ check_risk_consistency "pkg install"      "pkg.sh"     "install" "apt-get instal
 check_risk_consistency "pkg remove"       "pkg.sh"     "remove"  "apt-get remove some-pkg"
 check_risk_consistency "pkg update-cache" "pkg.sh"     "update-cache" "apt-get update"
 
+# P0 integration regressions: transport is capability-only, legacy context is
+# not an authorization mechanism, and quoted constitutional paths stay blocked.
+FAKE_BIN="$TMP_DIR/bin"
+mkdir -p "$FAKE_BIN"
+cat >"$FAKE_BIN/ssh" <<'SH'
+#!/usr/bin/env bash
+echo "token=super-secret"
+exit 0
+SH
+chmod +x "$FAKE_BIN/ssh"
+PATH="$FAKE_BIN:$PATH"
+
+expect_failure_contains \
+  "direct transport requires capability" \
+  "transport_unauthorized" \
+  bash "$ROOT/scripts/ssh_transport.sh" demo-edge-01 uptime
+
+expect_failure_contains \
+  "quoted forbidden path remains blocked" \
+  "forbidden_path" \
+  env HOSTS_YAML="$ROOT/hosts.example.yaml" AUTONOMY_YAML="$ROOT/autonomy.example.yaml" \
+  python3 "$ROOT/scripts/agent_gate.py" check-action --primitive exec.sh \
+    --host demo-edge-01 --arg 'cat "/root/.openclaw/openclaw.json"' \
+    --allow-raw-exec --confirm-risk --confirm-path
+
+expect_failure_contains \
+  "legacy approved context cannot bypass service gate" \
+  "action_blocked" \
+  env HOSTS_YAML="$ROOT/hosts.example.yaml" AUTONOMY_YAML="$ROOT/autonomy.example.yaml" \
+    SSH_SKILL_GATE_CONTEXT=approved bash "$ROOT/scripts/service.sh" demo-edge-01 stop caddy
+
 log "Completed $pass_count generic agent gate tests"

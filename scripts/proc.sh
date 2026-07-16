@@ -15,6 +15,11 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
 
+if [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
+  cmd=(python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive proc.sh --host "$HOST_NAME" --arg "$ACTION")
+  for arg in "$@"; do cmd+=(--arg "$arg"); done
+  exec "${cmd[@]}"
+fi
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 for arg in "$@"; do
   case "$arg" in
@@ -26,9 +31,6 @@ for arg in "$@"; do
     --confirm) die_json "invalid_confirmation" "禁止使用 legacy --confirm" "$HOST_NAME" ;;
   esac
 done
-if [[ "${SSH_SKILL_GATE_CONTEXT:-}" != approved ]]; then
-  gate_action proc.sh direct "$HOST_NAME" "$ACTION" "$@"
-fi
 q() { printf '%q' "$1"; }
 
 run_proc_cmd() {
@@ -45,7 +47,7 @@ run_proc_cmd() {
   "host": "$(json_escape "$HOST_NAME")",
   "primitive": "proc",
   "action": "$(json_escape "$op")",
-  "result": "$(json_escape "$RESULT")"
+  "result": $RESULT
 }
 JSON
     exit "$RC"
