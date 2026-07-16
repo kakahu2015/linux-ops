@@ -16,9 +16,25 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
 
+CONFIRM_FLAGS=()
+ACTION_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes; CONFIRM_FLAGS+=("$arg") ;;
+        --confirm-path) SSH_SKILL_CONFIRM_PATH=yes; CONFIRM_FLAGS+=("$arg") ;;
+        --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes; CONFIRM_FLAGS+=("$arg") ;;
+        --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes; CONFIRM_FLAGS+=("$arg") ;;
+        --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes; CONFIRM_FLAGS+=("$arg") ;;
+        --confirm) die_json "invalid_confirmation" "禁止使用 legacy --confirm" "$HOST_NAME" ;;
+        *) ACTION_ARGS+=("$arg") ;;
+    esac
+done
+set -- "${ACTION_ARGS[@]}"
+
 if [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
     cmd=(python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive sys.sh --host "$HOST_NAME" --arg "$ACTION")
     for arg in "$@"; do cmd+=(--arg "$arg"); done
+    cmd+=("${CONFIRM_FLAGS[@]}")
     exec "${cmd[@]}"
 fi
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
