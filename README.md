@@ -9,6 +9,12 @@ OpenClaw's general-purpose Linux operations skill. **`SKILL.md` is authoritative
 
 Composable, auditable, gated Linux primitives for remote ops. The Agent owns diagnosis and decisions; the skill owns boundaries, gates, audit, and rollback hooks.
 
+## Client Integrations
+
+- **OpenClaw:** agent bundle in `opencalw/`.
+- **Codex CLI:** local adapter in [`codex/SKILL.md`](codex/SKILL.md).
+- **Observed local versions:** see [the version record](docs/runtime-versions.zh-CN.md). Codex CLI, OpenClaw, and the Linux Ops skill have separate version numbers.
+
 ## Quick Start
 
 Key rule: **`hosts.yaml` contains aliases; real host values live in `.secrets`; the runtime maps them automatically.**

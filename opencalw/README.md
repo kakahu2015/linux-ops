@@ -2,6 +2,8 @@
 
 OpenClaw's general-purpose Linux operations skill. **`SKILL.md` is authoritative**.
 
+The installed OpenClaw application version is a separate host-specific value from this skill's `3.0.0` release. See [the local version record](../docs/runtime-versions.zh-CN.md).
+
 - [Agent Autonomy Model](docs/agent-autonomy.md)
 - Constitutional precedence: `../../AGENTS.md`
 
