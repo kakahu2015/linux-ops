@@ -5,7 +5,7 @@
   "description_en": "Agent-native Linux operations skill over SSH, providing composable primitives for system, file, process, network, package, service, transfer, and lock operations. v3.0 with constitutional precedence, Python gate, JSON primitive rules, semantic and path guards, risk mismatch detection, bounded observations, escalation, audit hashing, and structured schemas.",
   "about_en": "AI-native SSH/Linux ops v3.0: constitutional precedence, Python runtime gate, fail-closed semantic and path guards, bounded observations, escalation, audit hashing, and structured schemas.",
   "author": "kakahu2015",
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "keywords": ["linux", "ssh", "remote", "server", "scp", "vps", "devops", "agent", "ai-agent", "autonomy", "unattended", "runtime-gate", "decision-record", "policy-validation", "semantic-guard", "fail-closed", "path-guard", "risk-mismatch", "test-mode", "composite-observations", "escalation", "batch", "ops", "v3"],
   "categories": ["devops", "server", "linux", "ai-agent", "autonomy", "runtime-gate"],
   "requires": {

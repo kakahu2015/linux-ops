@@ -15,6 +15,10 @@ Composable, auditable, gated Linux primitives for remote ops. The Agent owns dia
 - **Codex CLI:** local adapter in [`codex/SKILL.md`](codex/SKILL.md).
 - **Observed local versions:** see [the version record](docs/runtime-versions.zh-CN.md). Codex CLI, OpenClaw, and the Linux Ops skill have separate version numbers.
 
+## License
+
+Copyright (C) 2026 kaka. This project is licensed under the GNU General Public License version 3 only (`GPL-3.0-only`). See [LICENSE](LICENSE) or the [official license text](https://www.gnu.org/licenses/gpl-3.0.html).
+
 ## Quick Start
 
 Key rule: **`hosts.yaml` contains aliases; real host values live in `.secrets`; the runtime maps them automatically.**
