@@ -111,6 +111,18 @@ Rules:
 - Verify real outcomes, do not assume success
 - Escalate when risk, ambiguity, or rollback uncertainty is high
 
+For a batch that uses the same artifact, procedure, and expected service
+behavior on equivalent hosts, fully verify one representative canary. After it
+succeeds, later hosts may use reduced verification: keep each host's gated
+operation result and check only the smallest host-specific postcondition needed
+to establish success (for example, the service is active, or one required health
+probe). Skip repeating deep diagnostics and checks the canary already covered.
+Do not treat the canary as proof that later hosts succeeded. If a later host
+fails or its result is unclear, pause the unstarted rollout and investigate.
+Use a separate canary for materially different host groups, such as a different
+architecture or service setup. This does not change decision-record, gate,
+policy, host-count, or concurrency requirements.
+
 ## Core Interfaces
 
 Primary entry points:
