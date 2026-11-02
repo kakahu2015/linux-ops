@@ -28,8 +28,8 @@ deny_always:
     action: block
 
   # System commands with wide impact
-  - id: shutdown_reboot
-    pattern: '(^|\s)(shutdown|reboot|poweroff|halt)(\s|$)'
+  - id: shutdown_poweroff_halt
+    pattern: '(^|\s)(shutdown|poweroff|halt)(\s|$)'
     risk: high
     action: block
   - id: killall_fuser
@@ -50,6 +50,11 @@ deny_always:
     action: block
 
 confirm_single_host:
+  # A single-host reboot requires explicit risk approval.
+  - id: reboot_requires_user_approval
+    pattern: '(^|\s)(systemctl\s+reboot|reboot)(\s|$)'
+    risk: high
+    action: confirm_single
   # Service state changes (stop, disable, mask)
   - id: systemctl_stop
     pattern: '(^|\s)(systemctl\s+stop|systemctl\s+disable|systemctl\s+mask|service\s+stop)(\s|$)'
@@ -69,6 +74,11 @@ confirm_single_host:
     action: confirm_single
 
 confirm_fleet:
+  # Rebooting multiple hosts also requires fleet approval and the autonomy gate's canary check.
+  - id: reboot_fleet_confirmation
+    pattern: '(^|\s)(systemctl\s+reboot|reboot)(\s|$)'
+    risk: high
+    action: confirm_fleet
   - id: restart_service
     pattern: '(^|\s)(systemctl\s+(restart|reload)|service\s+(restart|reload))(\s|$)'
     risk: medium
@@ -83,6 +93,11 @@ confirm_fleet:
     action: confirm_fleet
 
 confirm_prod:
+  # Production reboot requires explicit production approval as well as risk approval.
+  - id: prod_reboot_confirmation
+    pattern: '(^|\s)(systemctl\s+reboot|reboot)(\s|$)'
+    risk: high
+    action: confirm_prod
   - id: prod_service_stop
     pattern: '(^|\s)(systemctl\s+(stop|disable|mask|restart|reload)|service\s+(stop|restart|reload))(\s|$)'
     risk: medium
