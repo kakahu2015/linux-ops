@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # OpenClaw SSH Skill - 远程服务管理
-# 用法: bash service.sh <host|host1,host2,...> <action> [service_name] [--confirm]
+# 用法: bash service.sh <host|host1,host2,...> <action> [service_name] [confirmation flags]
 # action: start|stop|restart|status|logs|enable|disable
 set -euo pipefail
 
@@ -21,6 +21,7 @@ while [[ $# -gt 0 ]]; do
     --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes; CONFIRM_FLAGS+=("$1") ;;
     --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes; CONFIRM_FLAGS+=("$1") ;;
     --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes; CONFIRM_FLAGS+=("$1") ;;
+    --confirm-canary) SSH_SKILL_CONFIRM_CANARY=yes; CONFIRM_FLAGS+=("$1") ;;
     *) die_json "invalid_confirmation" "只允许使用独立确认参数" "$HOST_NAMES" ;;
   esac
   shift
@@ -31,6 +32,15 @@ if [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
     --host "$HOST_NAMES" --arg "$ACTION" --arg "$SERVICE_NAME")
   cmd+=("${CONFIRM_FLAGS[@]}")
   exec "${cmd[@]}"
+fi
+
+if [[ "$HOST_NAMES" == *,* ]]; then
+  exec bash "$SCRIPTS_DIR/runner.sh" \
+    --hosts "$HOST_NAMES" \
+    --primitive service.sh \
+    --arg "$ACTION" \
+    --arg "$SERVICE_NAME" \
+    "${CONFIRM_FLAGS[@]}"
 fi
 
 # Validate before use: SERVICE_NAME is interpolated directly into CMD below.

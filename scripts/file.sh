@@ -9,8 +9,9 @@
 #   bash file.sh <host> grep <pattern> <path> [limit]
 #   bash file.sh <host> checksum <path>
 #   bash file.sh <host> backup <path>
-#   bash file.sh <host> mkdir <path> [--confirm]
-#   bash file.sh <host> remove <path> --confirm
+#   bash file.sh <host> mkdir <path>
+#   bash file.sh <host> remove <file> --confirm-destructive
+#   bash file.sh <host> remove-dir <directory> --confirm-destructive
 set -euo pipefail
 
 HOST_NAME="${1:?用法: file.sh <host> <action> ...}"
@@ -32,6 +33,7 @@ for arg in "$@"; do
       --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes; CONFIRM_FLAGS+=("$arg") ;;
       --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes; CONFIRM_FLAGS+=("$arg") ;;
       --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes; CONFIRM_FLAGS+=("$arg") ;;
+      --confirm-canary) SSH_SKILL_CONFIRM_CANARY=yes; CONFIRM_FLAGS+=("$arg") ;;
       --confirm) die_json "invalid_confirmation" "禁止使用 legacy --confirm" "$HOST_NAME" ;;
       *) GATE_ARGS+=("$arg") ;;
     esac
@@ -124,9 +126,14 @@ case "$ACTION" in
     remove|rm)
         PATH_ARG="${1:?remove 缺少 path}"
         P="$(q "$PATH_ARG")"
-        run_file_cmd "rm -rf -- $P" "remove"
+        run_file_cmd "if [ -d $P ] && [ ! -L $P ]; then echo 'directory_requires_remove-dir' >&2; exit 2; fi; rm -f -- $P" "remove"
+        ;;
+    remove-dir)
+        PATH_ARG="${1:?remove-dir 缺少 path}"
+        P="$(q "$PATH_ARG")"
+        run_file_cmd "if [ -L $P ]; then rm -f -- $P; elif [ -d $P ]; then rm -rf -- $P; else echo 'not_a_directory' >&2; exit 2; fi" "remove-dir"
         ;;
     *)
-        die_json "invalid_action" "file action 支持: exists stat list head tail grep checksum backup mkdir remove" "$HOST_NAME"
+        die_json "invalid_action" "file action 支持: exists stat list head tail grep checksum backup mkdir remove remove-dir" "$HOST_NAME"
         ;;
 esac

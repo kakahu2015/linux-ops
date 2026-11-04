@@ -2,8 +2,8 @@
 # OpenClaw SSH Skill - collect lightweight host facts
 # 用法:
 #   bash facts.sh hk
-#   bash facts.sh --hosts "hk,us-west" --parallel 20
-#   bash facts.sh --target "tag=production" --parallel 20
+#   bash facts.sh --hosts "hk,us-west" --parallel 5
+#   bash facts.sh --target "tag=production" --parallel 5
 set -euo pipefail
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"

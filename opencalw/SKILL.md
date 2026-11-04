@@ -78,7 +78,7 @@ Sensitive areas require extra caution:
 The forbidden paths and other constitutional boundaries in `AGENTS.md` also
 apply here, even when they are not repeated in this file.
 
-If the action could leak credentials, lock out access, or touch auth, persistence, or firewall state, treat it as L4 unless proven otherwise.
+If the action could leak credentials, lock out access, change authentication or firewall rules, or alter operating-system startup persistence (such as systemd enablement or cron), treat it as L4 unless live evidence shows a narrower risk. Classify application-level settings by their service impact and target environment.
 
 ## Autonomy Levels
 
@@ -87,7 +87,7 @@ If the action could leak credentials, lock out access, or touch auth, persistenc
 | L0 | Advisory only; no remote execution | Always safe |
 | L1 | Read-only patrol and observation | Run unattended by default |
 | L2 | Low-risk, narrow, reversible, immediately verifiable action | May run unattended through policy and gate |
-| L3 | Narrow emergency containment or obvious security fix | May run unattended only with tight blast radius |
+| L3 | Bounded medium-risk non-production change | May run unattended with verification and a clear recovery path |
 | L4 | Major change or lockout-risk action | Requires explicit approval |
 | L5 | Forbidden behavior | Never execute |
 
@@ -95,33 +95,39 @@ When evidence is ambiguous, rollback is unclear, or blast radius is broad, escal
 
 ## Operating Model
 
-Default flow:
-1. Observe
-2. Classify
-3. Decide
-4. Gate
-5. Execute one primitive
-6. Verify
-7. Roll back or escalate if needed
+For Agent-managed changes, use one decision record per primitive:
+1. Observe and record the evidence
+2. Classify the risk and target environment
+3. Validate the decision and autonomy policy
+4. Dry-run the gate, then execute one primitive
+5. Verify the real outcome; roll back or escalate if needed
 
-Rules:
-- Prefer semantic primitives over raw shell
-- Keep changes minimal
-- Execute one primitive per decision
-- Verify real outcomes, do not assume success
-- Escalate when risk, ambiguity, or rollback uncertainty is high
+Prefer semantic primitives over raw shell. Keep each change narrow and verify
+the actual service or host state. A direct `run-action` primitive call is still
+gated, but it does not create a decision-record audit; reserve it for manual,
+single-action troubleshooting. Agent-managed changes use the structured
+`--decision` workflow.
+
+For production batch writes, run one host as a canary, verify it, then pass
+`--confirm-canary` for the remaining hosts. The flag attests that the canary
+already succeeded; it does not perform or verify the canary itself.
 
 For a batch that uses the same artifact, procedure, and expected service
-behavior on equivalent hosts, fully verify one representative canary. After it
-succeeds, later hosts may use reduced verification: keep each host's gated
-operation result and check only the smallest host-specific postcondition needed
-to establish success (for example, the service is active, or one required health
-probe). Skip repeating deep diagnostics and checks the canary already covered.
-Do not treat the canary as proof that later hosts succeeded. If a later host
-fails or its result is unclear, pause the unstarted rollout and investigate.
-Use a separate canary for materially different host groups, such as a different
-architecture or service setup. This does not change decision-record, gate,
-policy, host-count, or concurrency requirements.
+behavior on equivalent hosts, fully verify one representative canary. Once it
+succeeds, the default fast path is one multi-host decision per remaining
+primitive stage, executed concurrently up to the active policy's `max_parallel`
+limit with `--confirm-canary`. Do not create and execute identical per-host
+decisions merely to repeat the same stop, transfer, restart, or verification.
+
+For the post-canary batch, check only the smallest per-host postcondition needed
+to establish success (for example, the deployed checksum and active service).
+Use the batch summary first and inspect detailed result files only for failed or
+ambiguous hosts; do not re-run successful reads one host at a time. A canary does
+not prove that the remaining hosts succeeded, so a failed or unclear batch result
+still stops the next stage until the affected hosts are understood. Use a
+separate batch and canary for materially different architectures, artifacts,
+service setups, or expected behavior. Decision records, gate confirmations,
+policy host limits, and concurrency caps still apply.
 
 ## Core Interfaces
 
@@ -150,23 +156,6 @@ Support files:
 - `schemas/run-summary.schema.json`
 - `schemas/escalation-event.schema.json`
 - `tests/agent_gate_tests.sh`
-
-## Workflow
-
-Before execution:
-- Validate the decision record
-- Validate the autonomy policy
-- Run a dry-run gate check when appropriate
-
-Execution:
-- Run exactly one primitive
-- Respect computed risk and autonomy limits
-- Redact audit output
-
-After execution:
-- Verify the result on the real system
-- Roll back if verification fails and rollback is available
-- Escalate if the system state is uncertain
 
 ## Setup Notes
 

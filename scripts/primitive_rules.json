@@ -8,7 +8,6 @@
       "arg0": "host",
       "arg1": "command",
       "allowed_commands": ["summary", "disk", "memory", "load", "journal", "dmesg", "users"],
-      "risk_by_command": {"*": "low"},
       "unattended": {"L1": true, "L2": true, "L3": true},
       "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
@@ -53,28 +52,17 @@
         "checksum": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]},
         "backup": {"risk": "low", "mutating": true, "allowed_phases": ["execute", "rollback", "direct"]},
         "mkdir": {"risk": "medium", "mutating": true, "allowed_phases": ["execute", "rollback", "direct"]},
-        "remove": {"risk": "high", "mutating": true, "destructive": true, "allowed_phases": ["execute", "rollback", "direct"]}
+        "remove": {"risk": "medium", "mutating": true, "destructive": true, "allowed_phases": ["execute", "rollback", "direct"]},
+        "remove-dir": {"risk": "high", "mutating": true, "destructive": true, "allowed_phases": ["execute", "rollback", "direct"]}
       },
       "arg0": "host",
       "arg1": "command",
-      "allowed_commands": ["exists", "stat", "list", "head", "tail", "grep", "checksum", "backup", "mkdir", "remove"],
-      "risk_by_command": {
-        "exists": "low",
-        "stat": "low",
-        "list": "low",
-        "head": "low",
-        "tail": "low",
-        "grep": "low",
-        "checksum": "low",
-        "backup": "low",
-        "mkdir": "medium",
-        "remove": "high"
-      },
+      "allowed_commands": ["exists", "stat", "list", "head", "tail", "grep", "checksum", "backup", "mkdir", "remove", "remove-dir"],
       "unattended": {
         "L1": ["exists", "stat", "list", "head", "tail", "grep", "checksum"],
         "L2": ["backup"],
-        "L3": ["mkdir"],
-        "L4": ["remove"]
+        "L3": ["mkdir", "remove"],
+        "L4": ["remove-dir"]
       },
       "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
@@ -90,7 +78,6 @@
       "arg0": "host",
       "arg1": "command",
       "allowed_commands": ["top", "mem", "find", "tree", "kill"],
-      "risk_by_command": {"top": "low", "mem": "low", "find": "low", "tree": "low", "kill": "high"},
       "unattended": {"L1": ["top", "mem", "find", "tree"], "L3": [], "L4": ["kill"]},
       "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
@@ -100,7 +87,6 @@
       "arg0": "host",
       "arg1": "command",
       "allowed_commands": ["ports", "listen", "curl", "dns", "route", "addr"],
-      "risk_by_command": {"*": "low"},
       "unattended": {"L1": ["ports", "listen", "dns", "route", "addr"], "L2": ["curl"]},
       "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
@@ -117,14 +103,6 @@
       "arg0": "host",
       "arg1": "command",
       "allowed_commands": ["detect", "search", "installed", "update-cache", "install", "remove"],
-      "risk_by_command": {
-        "detect": "low",
-        "search": "low",
-        "installed": "low",
-        "update-cache": "low",
-        "install": "high",
-        "remove": "high"
-      },
       "unattended": {"L1": ["detect", "installed", "search"], "L3": ["update-cache"], "L4": ["install", "remove"]},
       "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
@@ -142,7 +120,6 @@
       "arg0": "host",
       "arg1": "command",
       "allowed_commands": ["start", "stop", "restart", "status", "logs", "enable", "disable"],
-      "risk_by_command": {"status": "low", "logs": "low", "restart": "medium", "start": "high", "enable": "high", "stop": "high", "disable": "high"},
       "unattended": {"L1": ["status", "logs"], "L3": ["restart"], "L4": ["start", "stop", "enable", "disable"]},
       "verify_exit_codes": {"healthy": [0], "failed": [1, 3], "error": [2, 126, 127, 124]}
     },
@@ -156,7 +133,6 @@
       "arg0": "host",
       "arg1": "command",
       "allowed_commands": ["status", "acquire", "release"],
-      "risk_by_command": {"status": "low", "acquire": "low", "release": "low"},
       "unattended": {"L1": ["status"], "L2": ["acquire", "release"]},
       "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
@@ -188,11 +164,14 @@
     },
     "scp_transfer.sh": {
       "description": "File transfer",
-      "commands": {"*": {"risk": "medium", "mutating": true, "allowed_phases": ["execute", "rollback", "direct"]}},
+      "commands": {
+        "upload": {"risk": "medium", "mutating": true, "allowed_phases": ["execute", "rollback", "direct"]},
+        "download": {"risk": "low", "mutating": false, "allowed_phases": ["execute", "verify", "direct"]}
+      },
       "arg0": "host",
       "arg1": "direction (upload|download)",
-      "risk": "medium",
-      "unattended": {"L3": true, "L4": true},
+      "allowed_commands": ["upload", "download"],
+      "unattended": {"L1": ["download"], "L3": ["upload"]},
       "verify_exit_codes": {"healthy": [0], "failed": [1], "error": [2, 126, 127, 124]}
     },
     "composite.sh": {
@@ -201,7 +180,6 @@
       "arg0": "host",
       "arg1": "action",
       "allowed_commands": ["healthcheck", "disk", "memory", "services", "network", "quick", "journal", "all"],
-      "risk_by_command": {"*": "low"},
       "unattended": {
         "L1": ["healthcheck", "disk", "memory", "services", "network", "quick", "journal"],
         "L2": ["healthcheck", "disk", "memory", "services", "network", "quick", "journal", "all"],

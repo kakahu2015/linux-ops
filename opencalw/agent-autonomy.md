@@ -23,7 +23,7 @@ observe -> classify -> decide -> gate -> execute -> verify -> stop / rollback / 
 - **L0**: Explain only; do not execute.
 - **L1**: Read-only observation.
 - **L2**: Low-risk, narrow, reversible, immediately verifiable actions.
-- **L3**: Narrow emergency containment or an obvious security fix.
+- **L3**: Bounded medium-risk non-production change with verification and a clear recovery path.
 - **L4**: High-risk, lockout-risk, or production-impacting actions; confirmation is required.
 - **L5**: Forbidden for unattended execution.
 

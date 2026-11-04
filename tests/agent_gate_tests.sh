@@ -50,6 +50,18 @@ expect_failure_contains() {
   fi
 }
 
+expect_output_excludes() {
+  local name="$1" unexpected="$2"; shift 2
+  "$@" >"$TMP_DIR/out.log" 2>"$TMP_DIR/err.log" || true
+  if grep -q "$unexpected" "$TMP_DIR/out.log" "$TMP_DIR/err.log" 2>/dev/null; then
+    cat "$TMP_DIR/out.log" >&2 || true
+    cat "$TMP_DIR/err.log" >&2 || true
+    echo "FAIL: $name contained unexpected marker: $unexpected" >&2
+    exit 1
+  fi
+  pass "$name"
+}
+
 write_decision() {
   local path="$1" level="$2" risk="$3" env="$4" primitive="$5" args_json="$6" max_hosts="$7" requires_confirmation="$8" hosts_json="$9"
   args_json="${args_json//demo-host-01/demo-edge-01}"
@@ -419,6 +431,11 @@ import json, sys
 rules = json.load(open(sys.argv[1]))["primitives"]
 primitive, cmd = sys.argv[2], sys.argv[3]
 rule = rules.get(primitive, {})
+commands = rule.get("commands", {})
+command_rule = commands.get(cmd, commands.get("*", {})) if isinstance(commands, dict) else {}
+if isinstance(command_rule, dict) and command_rule.get("risk"):
+    print(command_rule["risk"])
+    raise SystemExit
 rbc = rule.get("risk_by_command", {})
 if rbc:
     print(rbc.get(cmd, rbc.get("*", rule.get("risk", "low"))))
@@ -494,5 +511,29 @@ expect_failure_contains \
   env HOSTS_YAML="$ROOT/hosts.example.yaml" AUTONOMY_YAML="$ROOT/autonomy.example.yaml" \
     RUNS_DIR="$TMP_DIR/runs" bash "$ROOT/scripts/runner.sh" \
       --hosts demo-edge-01,demo-worker-01 --primitive sys.sh --arg summary
+
+expect_output_excludes \
+  "semantic runner inherits explicit fleet confirmation" \
+  "fleet_confirmation_required" \
+  env HOSTS_YAML="$ROOT/hosts.example.yaml" AUTONOMY_YAML="$ROOT/autonomy.example.yaml" \
+    AGENT_GATE_PRIMITIVES_DIR="$ROOT/scripts" SSH_SKILL_CONFIRM_FLEET=yes \
+    RUNS_DIR="$TMP_DIR/confirmed-runs" bash "$ROOT/scripts/runner.sh" \
+      --hosts demo-edge-01,demo-worker-01 --primitive sys.sh --arg summary
+
+batch_start_ms=$(date +%s%3N)
+expect_success \
+  "semantic runner executes confirmed hosts successfully" \
+  env HOSTS_YAML="$ROOT/hosts.example.yaml" AUTONOMY_YAML="$ROOT/autonomy.example.yaml" \
+    AGENT_GATE_PRIMITIVES_DIR="$ROOT/tests/fixtures/primitives" SSH_SKILL_CONFIRM_FLEET=yes \
+    GENERIC_BATCH_SLEEP_SEC=1 RUNS_DIR="$TMP_DIR/concurrent-runs" \
+    bash "$ROOT/scripts/runner.sh" --hosts demo-edge-01,demo-worker-01 \
+      --primitive sys.sh --arg summary --parallel 2
+batch_elapsed_ms=$(( $(date +%s%3N) - batch_start_ms ))
+if [[ "$batch_elapsed_ms" -lt 1800 ]]; then
+  pass "semantic runner executes host fan-out concurrently"
+else
+  echo "FAIL: semantic runner took ${batch_elapsed_ms}ms for two 1s fixtures" >&2
+  exit 1
+fi
 
 log "Completed $pass_count generic agent gate tests"

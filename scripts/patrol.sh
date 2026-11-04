@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # OpenClaw SSH Skill - lightweight VPS patrol checks
 # 用法:
-#   bash patrol.sh --target "tag=production" --parallel 20
+#   bash patrol.sh --target "tag=production" --parallel 5
 #   bash patrol.sh --hosts "hk,us-west" --service caddy --disk-threshold 85
 set -euo pipefail
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
+load_autonomy_limits
 
 HOSTS=""
 TARGET=""
 SERVICE="caddy"
 DISK_THRESHOLD=85
-PARALLEL=20
-TIMEOUT_SEC=30
+PARALLEL="$AUTONOMY_MAX_PARALLEL"
+TIMEOUT_SEC="$AUTONOMY_PER_HOST_TIMEOUT_SEC"
 
 usage() {
     cat <<'EOF'
@@ -23,8 +24,8 @@ Usage: patrol.sh (--hosts <csv>|--target <expr>) [options]
 Options:
   --service <name>          Service to check, default: caddy
   --disk-threshold <pct>    Root disk warning threshold, default: 85
-  --parallel <n>            Concurrent hosts, default: 20
-  --timeout <sec>           Per-host timeout, default: 30
+  --parallel <n>            Concurrent hosts, capped by autonomy.yaml
+  --timeout <sec>           Per-host timeout, capped by autonomy.yaml
 EOF
 }
 
@@ -44,6 +45,8 @@ done
 [[ -n "$HOSTS" || -n "$TARGET" ]] || die_json "missing_arg" "必须提供 --hosts 或 --target"
 [[ "$SERVICE" =~ ^[A-Za-z0-9_.@-]+$ ]] || die_json "invalid_service" "服务名包含非法字符: $SERVICE"
 [[ "$DISK_THRESHOLD" =~ ^[0-9]+$ ]] || die_json "invalid_arg" "--disk-threshold 必须是整数"
+[[ "$PARALLEL" =~ ^[0-9]+$ && "$PARALLEL" -ge 1 && "$PARALLEL" -le "$AUTONOMY_MAX_PARALLEL" ]] || die_json "policy_limit" "--parallel 必须在 1 到 autonomy.yaml 的 max_parallel=$AUTONOMY_MAX_PARALLEL 之间"
+[[ "$TIMEOUT_SEC" =~ ^[0-9]+$ && "$TIMEOUT_SEC" -ge 1 && "$TIMEOUT_SEC" -le "$AUTONOMY_PER_HOST_TIMEOUT_SEC" ]] || die_json "policy_limit" "--timeout 必须在 1 到 autonomy.yaml 的 per_host_timeout_sec=$AUTONOMY_PER_HOST_TIMEOUT_SEC 秒之间"
 
 # SERVICE and DISK_THRESHOLD are validated above, then embedded as constants.
 # Other variables intentionally expand on the remote host, not locally.

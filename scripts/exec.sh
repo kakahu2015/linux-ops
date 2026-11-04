@@ -12,13 +12,14 @@ SSH_SKILL_ALLOW_RAW_EXEC="${SSH_SKILL_ALLOW_RAW_EXEC:-}"
 shift 2
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --confirm-risk|--confirm-path|--confirm-fleet|--confirm-prod|--confirm-destructive)
+        --confirm-risk|--confirm-path|--confirm-fleet|--confirm-prod|--confirm-destructive|--confirm-canary)
             case "$1" in
                 --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes ;;
                 --confirm-path) SSH_SKILL_CONFIRM_PATH=yes ;;
                 --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes ;;
                 --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes ;;
                 --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes ;;
+                --confirm-canary) SSH_SKILL_CONFIRM_CANARY=yes ;;
             esac
             CONFIRM_FLAGS+=("$1"); shift ;;
         --allow-raw-exec)

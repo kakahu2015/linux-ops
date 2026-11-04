@@ -26,8 +26,9 @@ description: 通过现有 Linux Ops SSH primitives 和 agent gate 观察、诊�
 ## 批量验证
 
 - 同一批主机只有在使用相同制品、部署步骤和预期服务行为时，才共用一台 canary；架构或服务配置等实质不同的主机组分别选择 canary。
-- 对代表性 canary 做完整验证。成功后，同批后续主机可简化为逐台确认 gate 执行结果和最小必要后置条件（如服务处于 active，或一项必要健康探测），跳过 canary 已覆盖的深度诊断与冗余检查。
-- canary 成功不代表其他主机成功。若某台失败或结果不明确，暂停尚未开始的部署并调查。简化验证不改变 decision record、gate、policy、主机数或并发限制。
+- 对代表性 canary 做完整验证。成功后，同构剩余主机默认按 primitive 阶段各用一条覆盖全部目标的 decision record，并带 `--confirm-canary` 在 policy 的 `max_parallel` 范围内批量并发执行；不要为相同的停止、传输、重启或验证动作逐台重复建决策和调用 gate。
+- 后续批次只保留最小逐机后置条件（如制品哈希和服务 active）。优先读取 batch summary，只展开失败或结果不明确主机的明细；成功结果不要再逐台重复查询。
+- canary 成功不代表批次必然成功。某台失败或结果不明确时，停止下一阶段并只调查受影响主机。架构、制品、服务配置或预期行为不同的主机必须另分批次并重新 canary；decision record、gate、policy 主机数与并发限制仍然生效。
 
 ## 操作流程
 

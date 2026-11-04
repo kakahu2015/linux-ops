@@ -4,9 +4,9 @@
 #   bash pkg.sh <host> detect
 #   bash pkg.sh <host> search <name> [limit]
 #   bash pkg.sh <host> installed <name>
-#   bash pkg.sh <host> install <name> --confirm
-#   bash pkg.sh <host> remove <name> --confirm
-#   bash pkg.sh <host> update-cache --confirm
+#   bash pkg.sh <host> install <name> --confirm-risk --confirm-prod
+#   bash pkg.sh <host> remove <name> --confirm-risk --confirm-prod --confirm-destructive
+#   bash pkg.sh <host> update-cache --confirm-risk --confirm-prod
 set -euo pipefail
 
 HOST_NAME="${1:?用法: pkg.sh <host> <action> ...}"
@@ -28,6 +28,7 @@ for arg in "$@"; do
       --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes; CONFIRM_FLAGS+=("$arg") ;;
       --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes; CONFIRM_FLAGS+=("$arg") ;;
       --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes; CONFIRM_FLAGS+=("$arg") ;;
+      --confirm-canary) SSH_SKILL_CONFIRM_CANARY=yes; CONFIRM_FLAGS+=("$arg") ;;
       --confirm) die_json "invalid_confirmation" "禁止使用 legacy --confirm" "$HOST_NAME" ;;
       *) GATE_ARGS+=("$arg") ;;
     esac

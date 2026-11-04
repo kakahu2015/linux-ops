@@ -187,6 +187,9 @@ def validate(policy: Any) -> list[str]:
                 fail(errors, f"$.unattended_defaults.{int_key}", "must be a non-negative integer")
         if isinstance(defaults.get("max_hosts"), int) and defaults["max_hosts"] < 1:
             fail(errors, "$.unattended_defaults.max_hosts", "must be >= 1")
+        for positive_key in ("max_parallel", "per_host_timeout_sec"):
+            if isinstance(defaults.get(positive_key), int) and defaults[positive_key] < 1:
+                fail(errors, f"$.unattended_defaults.{positive_key}", "must be >= 1")
         for bool_key in ("require_decision_record", "require_post_action_verification", "stop_on_policy_block", "stop_on_failed_verification", "stop_on_conflicting_evidence"):
             if not isinstance(defaults.get(bool_key), bool):
                 fail(errors, f"$.unattended_defaults.{bool_key}", "must be boolean")

@@ -79,8 +79,11 @@ unattended_defaults:
   stop_on_failed_verification: true
   stop_on_conflicting_evidence: true
 
-# Descriptive policy contract. The current runtime gate also applies its
-# fail-closed built-in primitive allowlist and constitutional checks.
+# agent_gate applies environment confirmation rules and checks this unattended
+# allowlist. --confirm-risk can authorize an action outside the allowlist, and
+# exceeding max_hosts requires --confirm-fleet. runner caps max_parallel and
+# per_host_timeout_sec; structured --decision execution enforces
+# require_post_action_verification. Other defaults guide Agent workflow.
 allowed_unattended_primitives:
   L1:
     - sys.sh
@@ -106,12 +109,17 @@ allowed_unattended_primitives:
     - "pkg.sh:installed"
     - "service.sh:status"
     - "service.sh:logs"
+    - "scp_transfer.sh:download"
   L2:
     - "lock.sh:status"
     - "file.sh:backup"
   L3:
     - "service.sh:restart"
     - "pkg.sh:update-cache"
+    - "file.sh:remove"
+    - "scp_transfer.sh:upload"
+  L4:
+    - "file.sh:remove-dir"
 
 always_escalate:
   - production medium-risk or high-risk actions

@@ -1,23 +1,71 @@
 #!/usr/bin/env bash
 # OpenClaw SSH Skill - SCP 文件传输（复用 ControlMaster）
 # 用法:
-#   bash scp_transfer.sh <host> upload   /local/path /remote/path [--force-release]
-#   bash scp_transfer.sh <host> download /remote/path /local/path
+#   bash scp_transfer.sh <host|host1,host2,...> upload /local/path /remote/path [--force-release] [confirmation flags]
+#   bash scp_transfer.sh <host> download /remote/path /local/path [confirmation flags]
 set -euo pipefail
 
 HOST_NAME="${1:?用法: scp_transfer.sh <host> <upload|download> <src> <dst> [--force-release]}"
 DIRECTION="${2:?缺少方向: upload 或 download}"
 SRC="${3:?缺少源路径}"
 DST="${4:?缺少目标路径}"
-FORCE_RELEASE="${5:-}"
+shift 4
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
 
+FORCE_RELEASE=""
+CONFIRM_FLAGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force-release) FORCE_RELEASE="$1" ;;
+      --confirm-risk) SSH_SKILL_CONFIRM_RISK=yes; CONFIRM_FLAGS+=("$1") ;;
+      --confirm-path) SSH_SKILL_CONFIRM_PATH=yes; CONFIRM_FLAGS+=("$1") ;;
+      --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes; CONFIRM_FLAGS+=("$1") ;;
+      --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes; CONFIRM_FLAGS+=("$1") ;;
+      --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes; CONFIRM_FLAGS+=("$1") ;;
+      --confirm-canary) SSH_SKILL_CONFIRM_CANARY=yes; CONFIRM_FLAGS+=("$1") ;;
+      *) die_json "invalid_arg" "未知参数: $1" "$HOST_NAME" ;;
+    esac
+    shift
+done
+
+RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
+
+if [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
+    cmd=(python3 "$SCRIPTS_DIR/agent_gate.py" run-action
+        --primitive scp_transfer.sh --host "$HOST_NAME"
+        --arg "$DIRECTION" --arg "$SRC" --arg "$DST")
+    [[ -n "$FORCE_RELEASE" ]] && cmd+=(--arg="$FORCE_RELEASE")
+    cmd+=("${CONFIRM_FLAGS[@]}")
+    exec "${cmd[@]}"
+fi
+
+require_gate_capability scp_transfer.sh "$HOST_NAME"
+
+if [[ "$DIRECTION" == download && -n "$FORCE_RELEASE" ]]; then
+    die_json "invalid_arg" "--force-release 只适用于 upload" "$HOST_NAME"
+fi
+
+if [[ "$HOST_NAME" == *,* ]]; then
+    [[ "$DIRECTION" == upload ]] || \
+        die_json "invalid_arg" "多主机并发只支持 upload，download 必须使用唯一的本地目标逐台执行" "$HOST_NAME"
+    runner_args=(
+        --hosts "$HOST_NAME"
+        --primitive scp_transfer.sh
+        --arg "$DIRECTION"
+        --arg "$SRC"
+        --arg "$DST"
+    )
+    [[ -n "$FORCE_RELEASE" ]] && runner_args+=(--arg "$FORCE_RELEASE")
+    runner_args+=("${CONFIRM_FLAGS[@]}")
+    exec bash "$SCRIPTS_DIR/runner.sh" "${runner_args[@]}"
+fi
+
 load_host_config "$HOST_NAME"
 CTL_SOCKET="$(control_socket "$HOST_NAME")"
-RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
 ensure_connected "$HOST_NAME" "$CTL_SOCKET"
 
 remote_quote() {
@@ -34,10 +82,11 @@ check_and_release_file() {
     quoted="$(remote_quote "$remote_file")"
     status=$(run_remote_raw "if [ -f $quoted ]; then if command -v fuser >/dev/null 2>&1 && fuser $quoted >/dev/null 2>&1; then echo BUSY; else echo FREE; fi; else echo NOT_EXIST; fi" 2>/dev/null || echo "ERROR")
     if echo "$status" | grep -q "BUSY"; then
-        if [[ "$FORCE_RELEASE" != "--force-release" && "${SSH_SKILL_FORCE_RELEASE:-}" != "yes" ]]; then
-            die_json "target_busy" "目标文件被进程占用，未自动释放。需要显式追加 --force-release 或设置 SSH_SKILL_FORCE_RELEASE=yes: $remote_file" "$HOST_NAME"
+        if [[ "$FORCE_RELEASE" != "--force-release" ]]; then
+            die_json "target_busy" "目标文件被进程占用。需显式使用 --force-release --confirm-risk --confirm-destructive 才会释放: $remote_file" "$HOST_NAME"
         fi
-        policy_check_command "sudo fuser -k $quoted" 1 "--confirm" "$HOST_NAME"
+        # The outer semantic gate classifies --force-release as high-risk and
+        # requires both --confirm-risk and --confirm-destructive.
         echo "[ssh-skill] 检测到目标文件被占用，按显式授权释放..." >&2
         run_remote_raw "sudo fuser -k $quoted 2>/dev/null; sleep 1" >/dev/null 2>&1 || true
     fi

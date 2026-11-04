@@ -24,6 +24,7 @@ for arg in "$@"; do
     --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes; CONFIRM_FLAGS+=("$arg") ;;
     --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes; CONFIRM_FLAGS+=("$arg") ;;
     --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes; CONFIRM_FLAGS+=("$arg") ;;
+    --confirm-canary) SSH_SKILL_CONFIRM_CANARY=yes; CONFIRM_FLAGS+=("$arg") ;;
     --confirm) die_json "invalid_confirmation" "禁止使用 legacy --confirm" "$HOST_NAME" ;;
   esac
 done
@@ -31,7 +32,7 @@ if [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" != internal ]]; then
   cmd=(python3 "$SCRIPTS_DIR/agent_gate.py" run-action --primitive proc.sh --host "$HOST_NAME" --arg "$ACTION")
   for arg in "$@"; do
     case "$arg" in
-      --confirm-risk|--confirm-path|--confirm-fleet|--confirm-prod|--confirm-destructive) ;;
+      --confirm-risk|--confirm-path|--confirm-fleet|--confirm-prod|--confirm-destructive|--confirm-canary) ;;
       *) cmd+=(--arg "$arg") ;;
     esac
   done

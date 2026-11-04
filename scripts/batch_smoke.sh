@@ -2,18 +2,19 @@
 # OpenClaw Linux Ops Skill - batch smoke scenarios
 # 默认只读测试，不修改远端机器。
 # 用法:
-#   bash scripts/batch_smoke.sh --target "tag=production" --parallel 20 --timeout 30
+#   bash scripts/batch_smoke.sh --target "tag=production" --parallel 5 --timeout 30
 #   bash scripts/batch_smoke.sh --hosts "hk,us-west,google" --service caddy
 set -euo pipefail
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
+load_autonomy_limits
 
 HOSTS=""
 TARGET=""
-PARALLEL=10
-TIMEOUT_SEC=30
+PARALLEL="$AUTONOMY_MAX_PARALLEL"
+TIMEOUT_SEC="$AUTONOMY_PER_HOST_TIMEOUT_SEC"
 SERVICE="caddy"
 SCENARIO="all"
 RUN_ID="${SSH_SKILL_RUN_ID:-$(make_run_id)}"
@@ -25,8 +26,8 @@ Usage: batch_smoke.sh (--hosts <csv>|--target <expr>) [options]
 Options:
   --hosts <csv>             Explicit hosts, e.g. hk,us-west,google
   --target <expr>           Selector expression, e.g. tag=production,role=edge
-  --parallel <n>            Max concurrent hosts, default: 10
-  --timeout <sec>           Per-host timeout, default: 30
+  --parallel <n>            Max concurrent hosts; capped by autonomy.yaml
+  --timeout <sec>           Per-host timeout; capped by autonomy.yaml
   --service <name>          Service to check, default: caddy
   --scenario <name>         all|connectivity|system|disk|network|service|files|pkg
 
@@ -48,8 +49,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$HOSTS" || -n "$TARGET" ]] || die_json "missing_arg" "必须提供 --hosts 或 --target"
-[[ "$PARALLEL" =~ ^[0-9]+$ && "$PARALLEL" -ge 1 ]] || die_json "invalid_arg" "--parallel 必须是正整数"
-[[ "$TIMEOUT_SEC" =~ ^[0-9]+$ ]] || die_json "invalid_arg" "--timeout 必须是整数"
+[[ "$PARALLEL" =~ ^[0-9]+$ && "$PARALLEL" -ge 1 && "$PARALLEL" -le "$AUTONOMY_MAX_PARALLEL" ]] || die_json "policy_limit" "--parallel 必须在 1 到 autonomy.yaml 的 max_parallel=$AUTONOMY_MAX_PARALLEL 之间"
+[[ "$TIMEOUT_SEC" =~ ^[0-9]+$ && "$TIMEOUT_SEC" -ge 1 && "$TIMEOUT_SEC" -le "$AUTONOMY_PER_HOST_TIMEOUT_SEC" ]] || die_json "policy_limit" "--timeout 必须在 1 到 autonomy.yaml 的 per_host_timeout_sec=$AUTONOMY_PER_HOST_TIMEOUT_SEC 秒之间"
 [[ "$SERVICE" =~ ^[A-Za-z0-9_.@-]+$ ]] || die_json "invalid_service" "服务名包含非法字符: $SERVICE"
 
 RUN_DIR="$RUNS_DIR/$RUN_ID/batch_smoke"

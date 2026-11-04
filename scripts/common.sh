@@ -48,6 +48,60 @@ die_json() {
     exit 1
 }
 
+gate_capability_valid() {
+    local expected_primitive="${1-}" host_name="${2:?缺少 host}"
+    local cap_file="${SSH_SKILL_CAPABILITY_FILE:-}" cap_token="${SSH_SKILL_CAPABILITY_TOKEN:-}"
+    [[ "${SSH_SKILL_EXECUTOR_CONTEXT:-}" == internal && -n "$cap_file" && -f "$cap_file" && -n "$cap_token" ]] || return 1
+    python3 - "$cap_file" "$cap_token" "$expected_primitive" "$host_name" <<'PY'
+import hmac, json, math, sys, time
+
+path, token, primitive, host = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("invalid capability")
+    stored_token = data.get("token")
+    if not isinstance(stored_token, str):
+        raise ValueError("invalid token")
+    expires_at = float(data.get("expires_at", 0))
+except (OSError, ValueError, TypeError):
+    raise SystemExit(1)
+
+hosts = {item.strip() for item in str(data.get("hosts", "")).split(",") if item.strip()}
+target_hosts = {item.strip() for item in host.split(",") if item.strip()}
+if (not hmac.compare_digest(stored_token.encode(), token.encode())
+        or not math.isfinite(expires_at)
+        or time.time() >= expires_at
+        or (primitive and data.get("primitive") != primitive)
+        or not target_hosts
+        or not target_hosts.issubset(hosts)):
+    raise SystemExit(1)
+PY
+}
+
+require_gate_capability() {
+    local expected_primitive="${1-}" host_name="${2:?缺少 host}" error="${3:-transport_unauthorized}"
+    gate_capability_valid "$expected_primitive" "$host_name" || \
+        die_json "$error" "操作必须由 agent_gate 授权" "$host_name"
+}
+
+load_autonomy_limits() {
+    local policy_file="${AUTONOMY_YAML:-$SKILL_DIR/autonomy.yaml}" values
+    values="$(AUTONOMY_YAML="$policy_file" PYTHONPATH="$SCRIPTS_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
+import os
+from pathlib import Path
+from agent_gate import AutonomyPolicy
+
+policy = AutonomyPolicy(Path(os.environ["AUTONOMY_YAML"]))
+print(policy.max_parallel, policy.per_host_timeout_sec)
+PY
+)"
+    read -r AUTONOMY_MAX_PARALLEL AUTONOMY_PER_HOST_TIMEOUT_SEC <<<"$values"
+    [[ "$AUTONOMY_MAX_PARALLEL" =~ ^[0-9]+$ && "$AUTONOMY_MAX_PARALLEL" -ge 1 ]] || die_json "policy_invalid" "max_parallel 必须是正整数"
+    [[ "$AUTONOMY_PER_HOST_TIMEOUT_SEC" =~ ^[0-9]+$ && "$AUTONOMY_PER_HOST_TIMEOUT_SEC" -ge 1 ]] || die_json "policy_invalid" "per_host_timeout_sec 必须是正整数"
+}
+
 require_hosts_yaml() {
     [[ -f "$HOSTS_YAML" ]] || die_json "config_not_found" "hosts.yaml 不存在: $HOSTS_YAML。复制 hosts.example.yaml 为 hosts.yaml，并把真实 HOST/KEY_PATH 放进 .secrets/<host>.env。"
 }
@@ -179,6 +233,7 @@ gate_action() {
     [[ "${SSH_SKILL_CONFIRM_FLEET:-}" == yes ]] && cmd+=(--confirm-fleet)
     [[ "${SSH_SKILL_CONFIRM_PROD:-}" == yes ]] && cmd+=(--confirm-prod)
     [[ "${SSH_SKILL_CONFIRM_DESTRUCTIVE:-}" == yes ]] && cmd+=(--confirm-destructive)
+    [[ "${SSH_SKILL_CONFIRM_CANARY:-}" == yes ]] && cmd+=(--confirm-canary)
     local result rc
     set +e
     result="$("${cmd[@]}" 2>/dev/null)"

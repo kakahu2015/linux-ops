@@ -8,29 +8,10 @@ REMOTE_CMD="${2:?缺少命令参数}"
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPTS_DIR/common.sh"
 
-CAP_FILE="${SSH_SKILL_CAPABILITY_FILE:-}"
-CAP_TOKEN="${SSH_SKILL_CAPABILITY_TOKEN:-}"
-[[ -n "$CAP_FILE" && -f "$CAP_FILE" && -n "$CAP_TOKEN" ]] || {
+gate_capability_valid "" "$HOST_NAME" || {
   echo '{"success":false,"error":"transport_unauthorized"}' >&2
   exit 126
 }
-if ! python3 - "$CAP_FILE" "$CAP_TOKEN" "$HOST_NAME" <<'PY'
-import json, sys, time
-path, token, host = sys.argv[1:]
-try:
-    data = json.load(open(path))
-except Exception:
-    raise SystemExit(1)
-hosts = [x.strip() for x in str(data.get("hosts", "")).split(",") if x.strip()]
-target_hosts = [x.strip() for x in host.split(",") if x.strip()]
-if (data.get("token") != token or time.time() > float(data.get("expires_at", 0))
-        or any(item not in hosts for item in target_hosts)):
-    raise SystemExit(1)
-PY
-then
-  echo '{"success":false,"error":"transport_unauthorized"}' >&2
-  exit 126
-fi
 
 if [[ "$HOST_NAME" == *,* ]]; then
   IFS=',' read -ra HOSTS <<< "$HOST_NAME"

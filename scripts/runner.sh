@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
 # OpenClaw SSH Skill - batch runner for agent-scale operations
 # 用法:
-#   bash runner.sh --target "tag=prod,role=edge" --cmd "uptime" --parallel 20
+#   bash runner.sh --target "tag=prod,role=edge" --cmd "uptime" --parallel 5
 #   bash runner.sh --hosts "hk,us-west" --cmd "systemctl status caddy --no-pager | head -20"
 set -euo pipefail
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPTS_DIR/common.sh"
+PRIMITIVES_DIR="${AGENT_GATE_PRIMITIVES_DIR:-$SCRIPTS_DIR}"
+
+load_autonomy_limits
+POLICY_MAX_PARALLEL="$AUTONOMY_MAX_PARALLEL"
+POLICY_TIMEOUT_SEC="$AUTONOMY_PER_HOST_TIMEOUT_SEC"
 
 HOST_CSV=""
 TARGET_EXPR=""
 REMOTE_CMD=""
 PRIMITIVE=""
 PRIMITIVE_ARGS=()
-PARALLEL=10
-TIMEOUT_SEC=0
+PARALLEL="$POLICY_MAX_PARALLEL"
+TIMEOUT_SEC="$POLICY_TIMEOUT_SEC"
 CONFIRM_FLAGS=()
 SUDO_FLAG=""
 FAIL_FAST_PERCENT=0
@@ -32,12 +37,13 @@ Execution:
   --cmd <command>           Remote command to execute
   --primitive <name>        Semantic primitive to execute per host
   --arg <value>             Argument passed to semantic primitive
-  --parallel <n>            Max concurrent hosts, default: 10
-  --timeout <sec>           Per-host timeout if GNU timeout exists, default: 0 disabled
+  --parallel <n>            Max concurrent hosts; capped by autonomy.yaml
+  --timeout <sec>           Per-host timeout; capped by autonomy.yaml
   --fail-fast <percent>     Stop scheduling more hosts if failure rate reaches percent
   --confirm-risk            Allow medium/high risk commands per policy
   --confirm-fleet           Confirm multi-host execution
   --confirm-prod            Confirm production writes
+  --confirm-canary          Confirm a canary was run and verified before the production batch
   --confirm-destructive     Confirm destructive commands
   --allow-raw-exec          Approve raw command execution
   --sudo                    Retry with sudo only after Permission denied
@@ -67,7 +73,7 @@ while [[ $# -gt 0 ]]; do
             FAIL_FAST_PERCENT="${2:?--fail-fast 缺少百分比}"; FAIL_FAST_PERCENT="${FAIL_FAST_PERCENT%%%}"; shift 2 ;;
         --confirm)
             die_json "invalid_confirmation" "禁止使用 legacy --confirm，请使用结构化确认参数" ;;
-        --confirm-risk|--confirm-path|--confirm-fleet|--confirm-prod|--confirm-destructive)
+        --confirm-risk|--confirm-path|--confirm-fleet|--confirm-prod|--confirm-destructive|--confirm-canary)
             CONFIRM_FLAGS+=("$1"); shift ;;
         --allow-raw-exec)
             SSH_SKILL_ALLOW_RAW_EXEC=yes; shift ;;
@@ -80,11 +86,31 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+inherit_confirmation() {
+    local flag="$1" value="$2" existing
+    [[ "$value" == yes ]] || return 0
+    for existing in "${CONFIRM_FLAGS[@]}"; do
+        [[ "$existing" == "$flag" ]] && return 0
+    done
+    CONFIRM_FLAGS+=("$flag")
+}
+
+# A structured outer gate exports its already-approved confirmations so a
+# capability-authorized batch can repeat the same semantic check before fan-out.
+inherit_confirmation --confirm-risk "${SSH_SKILL_CONFIRM_RISK:-}"
+inherit_confirmation --confirm-path "${SSH_SKILL_CONFIRM_PATH:-}"
+inherit_confirmation --confirm-fleet "${SSH_SKILL_CONFIRM_FLEET:-}"
+inherit_confirmation --confirm-prod "${SSH_SKILL_CONFIRM_PROD:-}"
+inherit_confirmation --confirm-destructive "${SSH_SKILL_CONFIRM_DESTRUCTIVE:-}"
+inherit_confirmation --confirm-canary "${SSH_SKILL_CONFIRM_CANARY:-}"
+
 [[ -n "$REMOTE_CMD" || -n "$PRIMITIVE" ]] || die_json "missing_arg" "缺少 --cmd 或 --primitive"
 [[ -z "$REMOTE_CMD" || -z "$PRIMITIVE" ]] || die_json "invalid_arg" "--cmd 与 --primitive 不能同时使用"
 [[ -n "$HOST_CSV" || -n "$TARGET_EXPR" ]] || die_json "missing_arg" "必须提供 --hosts 或 --target"
 [[ "$PARALLEL" =~ ^[0-9]+$ && "$PARALLEL" -ge 1 ]] || die_json "invalid_arg" "--parallel 必须是正整数"
 [[ "$TIMEOUT_SEC" =~ ^[0-9]+$ ]] || die_json "invalid_arg" "--timeout 必须是整数秒"
+[[ "$PARALLEL" -le "$POLICY_MAX_PARALLEL" ]] || die_json "policy_limit" "--parallel=$PARALLEL 超过 autonomy.yaml 的 max_parallel=$POLICY_MAX_PARALLEL"
+[[ "$TIMEOUT_SEC" -ge 1 && "$TIMEOUT_SEC" -le "$POLICY_TIMEOUT_SEC" ]] || die_json "policy_limit" "--timeout 必须在 1 到 autonomy.yaml 的 per_host_timeout_sec=$POLICY_TIMEOUT_SEC 秒之间"
 [[ "$FAIL_FAST_PERCENT" =~ ^[0-9]+$ && "$FAIL_FAST_PERCENT" -le 100 ]] || die_json "invalid_arg" "--fail-fast 必须是 0-100 的整数"
 
 if [[ -n "$TARGET_EXPR" ]]; then
@@ -108,7 +134,7 @@ TOTAL=${#HOSTS[@]}
 [[ "$TOTAL" -gt 0 ]] || die_json "empty_target" "没有匹配到目标主机"
 if [[ -n "$PRIMITIVE" ]]; then
     [[ "$PRIMITIVE" =~ ^[A-Za-z0-9_.-]+\.sh$ ]] || die_json "invalid_primitive" "primitive 名称非法: $PRIMITIVE"
-    [[ -f "$SCRIPTS_DIR/$PRIMITIVE" ]] || die_json "unknown_primitive" "primitive 不存在: $PRIMITIVE"
+    [[ -f "$PRIMITIVES_DIR/$PRIMITIVE" ]] || die_json "unknown_primitive" "primitive 不存在: $PRIMITIVE"
 else
     [[ "${SSH_SKILL_ALLOW_RAW_EXEC:-}" == yes ]] || die_json "raw_exec_blocked" "runner raw command requires --allow-raw-exec"
 fi
@@ -119,6 +145,7 @@ for flag in "${CONFIRM_FLAGS[@]}"; do
       --confirm-fleet) SSH_SKILL_CONFIRM_FLEET=yes ;;
       --confirm-prod) SSH_SKILL_CONFIRM_PROD=yes ;;
       --confirm-destructive) SSH_SKILL_CONFIRM_DESTRUCTIVE=yes ;;
+      --confirm-canary) SSH_SKILL_CONFIRM_CANARY=yes ;;
     esac
 done
 if [[ -n "$REMOTE_CMD" ]]; then
@@ -146,10 +173,10 @@ run_one() {
     if [[ -n "$PRIMITIVE" ]]; then
         if [[ "$TIMEOUT_SEC" -gt 0 ]]; then
             SSH_SKILL_RUN_ID="$RUN_ID" timeout "$TIMEOUT_SEC" \
-                bash "$SCRIPTS_DIR/$PRIMITIVE" "$host" "${PRIMITIVE_ARGS[@]}" "${CONFIRM_FLAGS[@]}" >"$out" 2>"$err"
+                bash "$PRIMITIVES_DIR/$PRIMITIVE" "$host" "${PRIMITIVE_ARGS[@]}" "${CONFIRM_FLAGS[@]}" >"$out" 2>"$err"
             rc=$?
         else
-            SSH_SKILL_RUN_ID="$RUN_ID" bash "$SCRIPTS_DIR/$PRIMITIVE" \
+            SSH_SKILL_RUN_ID="$RUN_ID" bash "$PRIMITIVES_DIR/$PRIMITIVE" \
                 "$host" "${PRIMITIVE_ARGS[@]}" "${CONFIRM_FLAGS[@]}" >"$out" 2>"$err"
             rc=$?
         fi

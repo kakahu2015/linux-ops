@@ -34,6 +34,7 @@ class ConfirmationSet:
     fleet: bool = False
     production: bool = False
     destructive: bool = False
+    canary: bool = False
     raw_exec: bool = False
 
 
@@ -117,7 +118,9 @@ class Inventory:
     def environment_for_host(self, alias: str) -> str:
         record = self.hosts.get(alias, {})
         env = str(record.get("env", "unknown")).lower()
-        return "prod" if env == "production" else env
+        if env in {"prod", "production"} or self.is_production(alias):
+            return "prod"
+        return env
 
     def environment_for_hosts(self, aliases: list[str]) -> str:
         environments = {self.environment_for_host(alias) for alias in aliases}
@@ -157,7 +160,10 @@ def level_risk_limit(level: str) -> int:
 
 def primitive_action_key(primitive: str, args: list[str]) -> str:
     op = args[1] if len(args) > 1 else (args[0] if args else "")
-    non_op_primitives = {"service.sh", "file.sh", "proc.sh", "net.sh", "pkg.sh", "sys.sh", "lock.sh"}
+    non_op_primitives = {
+        "service.sh", "file.sh", "proc.sh", "net.sh", "pkg.sh",
+        "sys.sh", "lock.sh", "scp_transfer.sh",
+    }
     if primitive in non_op_primitives:
         return f"{primitive}:{op}"
     return f"{primitive}:*"
@@ -180,50 +186,6 @@ def redact(text: str) -> str:
     for pattern, replacement in REDACT_SUBSTITUTIONS.items():
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
     return text
-
-
-L1_ALLOWED = [
-    "sys.sh:*", "facts.sh:*", "patrol.sh:*",
-    "file.sh:exists", "file.sh:stat", "file.sh:list", "file.sh:head",
-    "file.sh:tail", "file.sh:grep", "file.sh:checksum",
-    "proc.sh:top", "proc.sh:mem", "proc.sh:find", "proc.sh:tree",
-    "net.sh:ports", "net.sh:listen", "net.sh:dns", "net.sh:route", "net.sh:addr",
-    "pkg.sh:detect", "pkg.sh:installed", "pkg.sh:search",
-    "service.sh:status", "service.sh:logs",
-    "composite.sh:*",
-]
-
-L2_EXTRA = [
-    "lock.sh:status", "file.sh:backup", "connect.sh:*", "disconnect.sh:*",
-]
-
-L3_EXTRA = [
-    "service.sh:restart", "pkg.sh:update-cache", "file.sh:mkdir",
-]
-
-
-def _key_matches(key: str, pattern_list: list[str]) -> bool:
-    for pattern in pattern_list:
-        if pattern.endswith(":*"):
-            prefix = pattern[:-2]
-            if key.startswith(prefix):
-                return True
-        elif key == pattern:
-            return True
-    return False
-
-
-def is_allowed_without_confirmation(level: str, primitive: str, args: list[str]) -> bool:
-    key = primitive_action_key(primitive, args)
-    if level == "L0":
-        return False
-    if level == "L1":
-        return _key_matches(key, L1_ALLOWED)
-    if level == "L2":
-        return is_allowed_without_confirmation("L1", primitive, args) or _key_matches(key, L2_EXTRA)
-    if level == "L3":
-        return is_allowed_without_confirmation("L2", primitive, args) or _key_matches(key, L3_EXTRA)
-    return False
 
 
 def validate_primitive_name(primitive: str, primitives_dir: Path) -> None:
@@ -498,7 +460,12 @@ class AutonomyPolicy:
         self.path = path
         self.default_level = "L1"
         self.env_max_levels: dict[str, str] = {}
+        self.env_medium_risk_confirmation: dict[str, bool] = {}
+        self.env_high_risk_confirmation: dict[str, bool] = {}
+        self.env_require_canary: dict[str, bool] = {}
         self.max_hosts = 1
+        self.max_parallel = 5
+        self.per_host_timeout_sec = 30
         self.require_verification = True
         self.allowed_unattended: dict[str, list[str]] = {}
         self._parse()
@@ -518,6 +485,12 @@ class AutonomyPolicy:
             mh = defaults.get("max_hosts")
             if isinstance(mh, int):
                 self.max_hosts = mh
+            mp = defaults.get("max_parallel")
+            if isinstance(mp, int):
+                self.max_parallel = mp
+            timeout = defaults.get("per_host_timeout_sec")
+            if isinstance(timeout, int):
+                self.per_host_timeout_sec = timeout
             rv = defaults.get("require_post_action_verification")
             if isinstance(rv, bool):
                 self.require_verification = rv
@@ -529,6 +502,14 @@ class AutonomyPolicy:
                     level = env_body.get("max_unattended_level")
                     if isinstance(level, str):
                         self.env_max_levels[env_name.lower()] = level
+                    for key, mapping in (
+                        ("medium_risk_requires_confirmation", self.env_medium_risk_confirmation),
+                        ("high_risk_requires_confirmation", self.env_high_risk_confirmation),
+                        ("require_canary_for_fleet_changes", self.env_require_canary),
+                    ):
+                        value = env_body.get(key)
+                        if isinstance(value, bool):
+                            mapping[env_name.lower()] = value
 
         allowed = data.get("allowed_unattended_primitives", {})
         if isinstance(allowed, dict):
@@ -540,6 +521,16 @@ class AutonomyPolicy:
 
     def env_max_level(self, environment: str) -> str:
         return self.env_max_levels.get(environment, self.default_level)
+
+    def env_requires_risk_confirmation(self, environment: str, risk: str) -> bool:
+        if risk == "medium":
+            return self.env_medium_risk_confirmation.get(environment, False)
+        if risk == "high":
+            return self.env_high_risk_confirmation.get(environment, False)
+        return False
+
+    def env_requires_canary(self, environment: str) -> bool:
+        return self.env_require_canary.get(environment, False)
 
     def allows_unattended(self, level: str, primitive: str, args: list[str]) -> bool:
         """Apply the configured allowlist as an additional restriction.
@@ -640,6 +631,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Allow write actions targeting production environment")
     parser.add_argument("--confirm-destructive", action="store_true", default=False,
                         help="Allow explicitly destructive actions")
+    parser.add_argument("--confirm-canary", action="store_true", default=False,
+                        help="Confirm a canary was run and verified before this production batch")
     parser.add_argument("--rollback-on-failed-verification", action="store_true", default=False,
                         help="Run rollback_actions if verification fails")
     parser.add_argument("--allow-raw-exec", action="store_true", default=False,
@@ -718,6 +711,10 @@ class SemanticGuard:
 
         rule = self.rules[primitive]
 
+        if primitive == "scp_transfer.sh" and "--force-release" in args:
+            if len(args) < 2 or args[1] != "upload":
+                return False, "--force-release is valid only for upload"
+
         # Primitives with gate_handles_block=true skip semantic block checks
         if rule.get("gate_handles_block"):
             return True, ""
@@ -771,15 +768,12 @@ class SemanticGuard:
     def compute_risk(self, primitive: str, args: list[str]) -> str:
         if primitive not in self.rules:
             return "unknown"
+        if primitive == "scp_transfer.sh" and "--force-release" in args:
+            return "high"
         command_rule = self.command_rule(primitive, args)
         if command_rule.get("risk"):
             return str(command_rule["risk"])
-        rule = self.rules[primitive]
-        risk_by_cmd = rule.get("risk_by_command", {})
-        if risk_by_cmd and len(args) > 1:
-            cmd = args[1]
-            return risk_by_cmd.get(cmd, risk_by_cmd.get("*", "low"))
-        return rule.get("risk", "low")
+        return self.rules[primitive].get("risk", "low")
 
     def command_rule(self, primitive: str, args: list[str]) -> dict[str, Any]:
         rule = self.rules.get(primitive, {})
@@ -917,13 +911,31 @@ def preflight_action(
         assessment.reasons.append("fleet_confirmation_required")
     if assessment.prod_target and assessment.mutating and not confirmations.production:
         assessment.reasons.append("production_confirmation_required")
+    if inventory is not None and assessment.mutating and risk_num(assessment.risk) in {2, 3}:
+        requires_risk_confirmation = any(
+            policy.env_requires_risk_confirmation(inventory.environment_for_host(host), assessment.risk)
+            for host in hosts
+        )
+        if requires_risk_confirmation and not confirmations.risk:
+            assessment.reasons.append("environment_risk_confirmation_required")
+    if inventory is not None and assessment.mutating and assessment.host_count > 1:
+        requires_canary = any(
+            policy.env_requires_canary(inventory.environment_for_host(host))
+            for host in hosts
+        )
+        if requires_canary and not confirmations.canary:
+            assessment.reasons.append("canary_confirmation_required")
     if assessment.path_violation == "forbidden_path":
         assessment.reasons.append("forbidden_path")
     elif assessment.path_violation and not confirmations.path:
         assessment.reasons.append("path_confirmation_required")
     command = action.args[1] if len(action.args) > 1 else ""
     command_rule = semantic_guard.command_rule(action.primitive, action.args)
-    is_destructive = bool(command_rule.get("destructive")) or command in {"remove", "kill", "stop", "disable"}
+    is_destructive = (
+        bool(command_rule.get("destructive"))
+        or command in {"remove", "remove-dir", "kill", "stop", "disable"}
+        or (action.primitive == "scp_transfer.sh" and "--force-release" in action.args)
+    )
     if is_destructive and not confirmations.destructive:
         assessment.reasons.append("destructive_confirmation_required")
 
@@ -1075,6 +1087,7 @@ def _run_structured_action_check(args: argparse.Namespace, scripts_dir: Path, sk
             fleet=args.confirm_fleet,
             production=args.confirm_prod,
             destructive=args.confirm_destructive,
+            canary=args.confirm_canary,
             raw_exec=args.allow_raw_exec,
         ),
         autonomy_level=os.environ.get("AUTONOMY_LEVEL", policy.env_max_level(environment)),
@@ -1102,6 +1115,20 @@ def _run_structured_action_check(args: argparse.Namespace, scripts_dir: Path, sk
 
 def main() -> None:
     args = parse_args(sys.argv[1:])
+
+    # Preserve explicit gate confirmations for nested, capability-authorized
+    # batch runners. The outer gate remains authoritative; child primitives use
+    # these values only to repeat the same semantic preflight for a fan-out.
+    for enabled, name in (
+        (args.confirm_risk, "SSH_SKILL_CONFIRM_RISK"),
+        (args.confirm_path, "SSH_SKILL_CONFIRM_PATH"),
+        (args.confirm_fleet, "SSH_SKILL_CONFIRM_FLEET"),
+        (args.confirm_prod, "SSH_SKILL_CONFIRM_PROD"),
+        (args.confirm_destructive, "SSH_SKILL_CONFIRM_DESTRUCTIVE"),
+        (args.confirm_canary, "SSH_SKILL_CONFIRM_CANARY"),
+    ):
+        if enabled:
+            os.environ[name] = "yes"
 
     scripts_dir = Path(__file__).parent.resolve()
     skill_dir = scripts_dir.parent
@@ -1156,6 +1183,7 @@ def main() -> None:
             fleet=args.confirm_fleet or os.environ.get("SSH_SKILL_CONFIRM_FLEET") == "yes",
             production=args.confirm_prod or os.environ.get("SSH_SKILL_CONFIRM_PROD") == "yes",
             destructive=args.confirm_destructive or os.environ.get("SSH_SKILL_CONFIRM_DESTRUCTIVE") == "yes",
+            canary=args.confirm_canary or os.environ.get("SSH_SKILL_CONFIRM_CANARY") == "yes",
             raw_exec=args.allow_raw_exec or os.environ.get("SSH_SKILL_ALLOW_RAW_EXEC") == "yes",
         )
         assessment = preflight_action(
@@ -1223,6 +1251,7 @@ def main() -> None:
     confirmations = ConfirmationSet(
         risk=args.confirm_risk, path=args.confirm_path, fleet=args.confirm_fleet,
         production=args.confirm_prod, destructive=args.confirm_destructive,
+        canary=args.confirm_canary,
         raw_exec=args.allow_raw_exec,
     )
     effective_max_hosts = min(
@@ -1258,6 +1287,8 @@ def main() -> None:
                 "risk_confirmation_required": "autonomy_blocked",
                 "autonomy_blocked": "autonomy_blocked",
                 "environment_level_confirmation_required": "autonomy_blocked",
+                "environment_risk_confirmation_required": "autonomy_blocked",
+                "canary_confirmation_required": "autonomy_blocked",
                 "action_target_missing": "action_target_missing",
                 "action_target_scope_mismatch": "action_target_scope_mismatch",
                 "verification_must_be_read_only": "verification_blocked",
@@ -1274,6 +1305,8 @@ def main() -> None:
                 message = f"Command targets sensitive path: {assessment.path_violation}. Use --confirm-path."
             elif reason == "risk_confirmation_required":
                 message = "Action risk exceeds the autonomy policy. Use --confirm-risk."
+            elif reason == "canary_confirmation_required":
+                message = "Production fleet changes require a completed and verified canary. Use --confirm-canary only after it succeeds."
             else:
                 message = "; ".join(assessment.reasons)
             die_json(error, message)
